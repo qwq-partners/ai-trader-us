@@ -63,8 +63,10 @@ class PerformanceMetrics:
 
             # Sharpe Ratio (annualized)
             excess = returns / 100 - daily_rf
-            if np.std(excess) > 0:
-                metrics['sharpe_ratio'] = np.mean(excess) / np.std(excess) * np.sqrt(252)
+            std_excess = np.std(excess)
+            if std_excess > 1e-10:
+                sharpe = np.mean(excess) / std_excess * np.sqrt(252)
+                metrics['sharpe_ratio'] = max(-10, min(10, sharpe))  # Clamp
             else:
                 metrics['sharpe_ratio'] = 0
 

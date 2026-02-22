@@ -50,44 +50,60 @@ class BacktestEngine:
 
     def run(
         self,
-        strategy: BaseStrategy,
-        data: Dict[str, pd.DataFrame],
+        strategy: BaseStrategy = None,
+        data: Dict[str, pd.DataFrame] = None,
         initial_capital: float = 100_000,
         start_date: date = None,
         end_date: date = None,
+        strategies: List[BaseStrategy] = None,
     ) -> BacktestResult:
         """
-        Run backtest.
+        Run backtest with one or multiple strategies.
 
         Args:
-            strategy: Strategy instance
+            strategy: Single strategy instance (backward compatible)
             data: Dict of {symbol: DataFrame(OHLCV)} with DatetimeIndex
             initial_capital: Starting capital in USD
             start_date: Start date (None = use all data)
             end_date: End date (None = use all data)
+            strategies: List of strategy instances (multi-strategy mode)
         """
+        # Support both single and multi-strategy
+        if strategies:
+            strategy_list = strategies
+        elif strategy:
+            strategy_list = [strategy]
+        else:
+            raise ValueError("Provide either strategy or strategies")
+
+        # Map strategy type to strategy instance for exit handling
+        self._strategy_map = {s.strategy_type.value: s for s in strategy_list}
+
         portfolio = Portfolio(
             cash=Decimal(str(initial_capital)),
             initial_capital=Decimal(str(initial_capital)),
         )
 
         # Collect all dates across symbols
+        # Keep full data for history/indicators, only filter simulation dates
         all_dates = set()
         for symbol, df in data.items():
-            if start_date:
-                df = df[df.index >= pd.Timestamp(start_date)]
-            if end_date:
-                df = df[df.index <= pd.Timestamp(end_date)]
-            data[symbol] = df
-            all_dates.update(df.index.date if hasattr(df.index, 'date') else df.index)
+            dates = df.index.date if hasattr(df.index, 'date') else df.index
+            for d in dates:
+                if start_date and d < start_date:
+                    continue
+                if end_date and d > end_date:
+                    continue
+                all_dates.add(d)
 
         sorted_dates = sorted(all_dates)
         if not sorted_dates:
             logger.warning("No data to backtest")
             return BacktestResult()
 
+        strat_names = "+".join(s.name for s in strategy_list)
         logger.info(
-            f"Backtest: {strategy.name} | {len(data)} symbols | "
+            f"Backtest: {strat_names} | {len(data)} symbols | "
             f"{sorted_dates[0]} ~ {sorted_dates[-1]} | ${initial_capital:,.0f}"
         )
 
@@ -121,13 +137,14 @@ class BacktestEngine:
                 # Build price history for strategy
                 hist = df.loc[:ts]
 
-                # Generate signal
-                signal = strategy.evaluate(symbol, hist, portfolio)
-                if signal:
-                    signals.append(signal)
+                # Generate signals from ALL strategies
+                for strat in strategy_list:
+                    signal = strat.evaluate(symbol, hist, portfolio)
+                    if signal:
+                        signals.append(signal)
 
-            # Check exits first
-            exit_trades = self._check_exits(strategy, portfolio, data, ts)
+            # Check exits first (using strategy that opened each position)
+            exit_trades = self._check_exits_multi(strategy_list, portfolio, data, ts)
             trades.extend(exit_trades)
 
             # Process entry signals (sorted by score, highest first)
@@ -259,9 +276,9 @@ class BacktestEngine:
 
         return True
 
-    def _check_exits(self, strategy: BaseStrategy, portfolio: Portfolio,
-                     data: Dict[str, pd.DataFrame], ts: pd.Timestamp) -> List[TradeResult]:
-        """Check exit conditions for all positions"""
+    def _check_exits_multi(self, strategies: List[BaseStrategy], portfolio: Portfolio,
+                           data: Dict[str, pd.DataFrame], ts: pd.Timestamp) -> List[TradeResult]:
+        """Check exit conditions for all positions using the strategy that opened each"""
         trades = []
 
         for symbol in list(portfolio.positions.keys()):
@@ -273,6 +290,9 @@ class BacktestEngine:
             current_price = Decimal(str(bar['close']))
             low_price = Decimal(str(bar['low']))
             pos.current_price = current_price
+
+            # Find the strategy that opened this position
+            owning_strategy = self._strategy_map.get(pos.strategy, strategies[0])
 
             exit_reason = None
 
@@ -297,17 +317,17 @@ class BacktestEngine:
                 if pos.entry_time and pos.entry_time.date() < ts.date():
                     exit_reason = "eod_close"
 
-            # Max holding days (swing)
+            # Max holding days (swing) - use owning strategy's config
             elif pos.entry_time:
                 holding_days = (ts.to_pydatetime() - pos.entry_time).days
-                max_days = strategy.config.get('max_holding_days', 20)
+                max_days = owning_strategy.config.get('max_holding_days', 20)
                 if holding_days >= max_days:
                     exit_reason = "max_holding"
 
-            # Strategy custom exit
+            # Strategy custom exit (use owning strategy)
             if not exit_reason:
                 hist = data[symbol].loc[:ts]
-                exit_signal = strategy.check_exit(symbol, hist, pos)
+                exit_signal = owning_strategy.check_exit(symbol, hist, pos)
                 if exit_signal:
                     exit_reason = exit_signal
 

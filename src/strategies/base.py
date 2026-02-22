@@ -37,6 +37,9 @@ class BaseStrategy(ABC):
         self._indicator_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._max_cache_symbols = 500
 
+        # Sentiment scorer (optional, set externally)
+        self._sentiment_scorer = None
+
     def evaluate(self, symbol: str, history: pd.DataFrame,
                  portfolio: Portfolio) -> Optional[Signal]:
         """
@@ -60,6 +63,16 @@ class BaseStrategy(ABC):
 
         # Check entry conditions (implemented by subclass)
         signal = self.generate_signal(symbol, indicators, history, portfolio)
+
+        # Apply news sentiment adjustment if available
+        if signal and self._sentiment_scorer:
+            try:
+                adj = self._sentiment_scorer.get_adjustment(symbol)
+                if adj.bonus != 0:
+                    signal.score = max(0, min(100, signal.score + adj.bonus))
+                    signal.reason = f"{signal.reason} | {adj.reason}"
+            except Exception:
+                pass  # Don't fail on sentiment errors
 
         if signal and signal.score >= self.min_score:
             return signal
