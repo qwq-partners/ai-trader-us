@@ -111,6 +111,8 @@ def main():
     parser.add_argument('--sort', type=str, default='composite',
                         choices=['return', 'sharpe', 'composite'],
                         help='Sort results by')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Number of parallel workers (default: auto)')
     args = parser.parse_args()
 
     setup_logger("WARNING")
@@ -164,6 +166,7 @@ def main():
         end_date=end,
         validate=not args.no_validate,
         sort_by=args.sort,
+        n_workers=args.workers,
     )
 
     # Print best config for copy-paste

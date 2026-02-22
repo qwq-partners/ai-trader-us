@@ -2,13 +2,21 @@
 AI Trader US - Parameter Optimizer
 
 Grid Search + Walk-Forward combined optimization.
-Tests parameter combinations and validates with walk-forward to prevent overfitting.
+Tests parameter combinations in parallel and validates with walk-forward.
+
+Optimized for speed:
+- Pre-computed indicators (compute once, lookup per-day)
+- Initializer-based data sharing (no per-task pickling)
+- ProcessPoolExecutor with fork-safe worker pattern
 """
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Type
 from itertools import product
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
+import time
 import pandas as pd
 from loguru import logger
 
@@ -95,6 +103,7 @@ class OptimizerResult:
     param_grid: Dict[str, List[Any]]
     results: List[OptimizationResult] = field(default_factory=list)
     total_combinations: int = 0
+    elapsed_seconds: float = 0.0
 
     @property
     def best_by_return(self) -> Optional[OptimizationResult]:
@@ -116,8 +125,67 @@ class OptimizerResult:
         return [r for r in self.results if r.wf_robust and r.total_trades >= 10]
 
 
+# ================================================================
+# Worker functions (top-level for pickling)
+# ================================================================
+
+# Global worker state (initialized once per worker process via initializer)
+_WORKER_DATA = None
+_WORKER_STRATEGY_CLS = None
+
+
+def _init_worker(data_dict, strategy_cls_name, strategy_module,
+                 initial_capital, start_date, end_date):
+    """Initialize worker with shared data (called once per worker process)."""
+    global _WORKER_DATA, _WORKER_STRATEGY_CLS
+    import importlib
+
+    mod = importlib.import_module(strategy_module)
+    _WORKER_STRATEGY_CLS = getattr(mod, strategy_cls_name)
+
+    _WORKER_DATA = {
+        'data': data_dict,
+        'initial_capital': initial_capital,
+        'start_date': start_date,
+        'end_date': end_date,
+    }
+
+
+def _run_single_backtest(params: dict) -> dict:
+    """
+    Worker function for parallel backtest execution.
+    Uses global _WORKER_DATA initialized via _init_worker.
+    Only receives the parameter dict (lightweight).
+    """
+    global _WORKER_DATA, _WORKER_STRATEGY_CLS
+
+    config = TradingConfig()
+    strategy = _WORKER_STRATEGY_CLS(config=params)
+    engine = BacktestEngine(config=config)
+
+    result = engine.run(
+        strategy=strategy,
+        data=_WORKER_DATA['data'],
+        initial_capital=_WORKER_DATA['initial_capital'],
+        start_date=_WORKER_DATA['start_date'],
+        end_date=_WORKER_DATA['end_date'],
+        benchmark=None,  # Skip benchmark in parallel workers
+    )
+
+    return {
+        'params': params,
+        'total_return_pct': result.total_return_pct,
+        'max_drawdown_pct': result.max_drawdown_pct,
+        'sharpe_ratio': result.sharpe_ratio,
+        'win_rate': result.win_rate,
+        'profit_factor': result.profit_factor,
+        'total_trades': result.total_trades,
+        'avg_trade_pnl_pct': result.avg_trade_pnl_pct,
+    }
+
+
 class ParameterOptimizer:
-    """Grid Search + Walk-Forward parameter optimization"""
+    """Grid Search + Walk-Forward parameter optimization (parallel)"""
 
     def __init__(self, config: TradingConfig = None):
         self._config = config or TradingConfig()
@@ -135,9 +203,10 @@ class ParameterOptimizer:
         wf_test_months: int = 3,
         wf_step_months: int = 2,
         sort_by: str = "composite",
+        n_workers: int = None,
     ) -> OptimizerResult:
         """
-        Run grid search optimization with optional walk-forward validation.
+        Run grid search optimization with parallel backtest execution.
 
         Args:
             strategy_cls: Strategy class to optimize
@@ -146,8 +215,7 @@ class ParameterOptimizer:
             initial_capital: Starting capital
             start_date/end_date: Date range
             validate: Run walk-forward validation on top results
-            wf_train_months/wf_test_months/wf_step_months: Walk-forward params
-            sort_by: "return", "sharpe", "composite"
+            n_workers: Number of parallel workers (default: CPU count)
         """
         # Generate all parameter combinations
         param_names = list(param_grid.keys())
@@ -155,11 +223,14 @@ class ParameterOptimizer:
         combinations = list(product(*param_values))
         total = len(combinations)
 
+        if n_workers is None:
+            n_workers = min(os.cpu_count() or 4, total, 20)  # Cap at 20
+
         logger.info(
             f"Optimizer: {strategy_cls.name} | "
-            f"{len(param_names)} params x {total} combinations"
+            f"{len(param_names)} params x {total} combinations | "
+            f"{n_workers} workers"
         )
-        logger.info(f"  Grid: {', '.join(f'{k}={v}' for k, v in param_grid.items())}")
 
         opt_result = OptimizerResult(
             strategy_name=strategy_cls.name,
@@ -167,38 +238,75 @@ class ParameterOptimizer:
             total_combinations=total,
         )
 
-        # Phase 1: Grid Search (full backtest for each combo)
         print(f"\n{'='*70}")
-        print(f"GRID SEARCH: {strategy_cls.name} ({total} combinations)")
+        print(f"GRID SEARCH: {strategy_cls.name} ({total} combinations, {n_workers} workers)")
         print(f"{'='*70}")
 
-        for i, combo in enumerate(combinations):
-            params = dict(zip(param_names, combo))
+        t0 = time.time()
 
-            logger.info(f"  [{i+1}/{total}] {params}")
+        # Phase 1: Parallel Grid Search
+        strategy_module = strategy_cls.__module__
+        strategy_cls_name = strategy_cls.__name__
 
-            strategy = strategy_cls(config=params)
-            engine = BacktestEngine(config=self._config)
+        all_params = [dict(zip(param_names, combo)) for combo in combinations]
 
-            result = engine.run(
-                strategy=strategy,
-                data={s: df.copy() for s, df in data.items()},
-                initial_capital=initial_capital,
-                start_date=start_date,
-                end_date=end_date,
-            )
+        completed = 0
+        results_map = {}  # params_key -> result dict
 
-            opt_res = OptimizationResult(params=params, backtest=result)
-            opt_result.results.append(opt_res)
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_init_worker,
+            initargs=(data, strategy_cls_name, strategy_module,
+                      initial_capital, start_date, end_date),
+        ) as executor:
+            future_to_params = {}
+            for params in all_params:
+                future = executor.submit(_run_single_backtest, params)
+                future_to_params[future] = params
 
-            # Progress
-            trades = result.total_trades
-            ret = result.total_return_pct
-            sr = result.sharpe_ratio
-            wr = result.win_rate
-            print(f"  [{i+1:3d}/{total}] "
-                  f"trades={trades:4d} ret={ret:+6.1f}% sr={sr:+5.2f} wr={wr:4.0f}% "
-                  f"| {params}")
+            for future in as_completed(future_to_params):
+                params = future_to_params[future]
+                completed += 1
+                try:
+                    res = future.result()
+                    results_map[str(params)] = res
+
+                    trades = res['total_trades']
+                    ret = res['total_return_pct']
+                    sr = res['sharpe_ratio']
+                    wr = res['win_rate']
+
+                    # Progress (print every 10 or for last)
+                    if completed % 10 == 0 or completed == total:
+                        elapsed = time.time() - t0
+                        rate = completed / elapsed
+                        eta = (total - completed) / rate if rate > 0 else 0
+                        print(f"  [{completed:4d}/{total}] "
+                              f"trades={trades:4d} ret={ret:+6.1f}% sr={sr:+5.2f} wr={wr:4.0f}% "
+                              f"| ETA {eta:.0f}s | {params}")
+                except Exception as e:
+                    logger.error(f"Worker error for {params}: {e}")
+
+        elapsed = time.time() - t0
+        opt_result.elapsed_seconds = elapsed
+
+        # Convert results to OptimizationResult objects (ordered by original grid)
+        for params in all_params:
+            res = results_map.get(str(params))
+            if res:
+                bt = BacktestResult(
+                    total_return_pct=res['total_return_pct'],
+                    max_drawdown_pct=res['max_drawdown_pct'],
+                    sharpe_ratio=res['sharpe_ratio'],
+                    win_rate=res['win_rate'],
+                    profit_factor=res['profit_factor'],
+                    total_trades=res['total_trades'],
+                    avg_trade_pnl_pct=res['avg_trade_pnl_pct'],
+                )
+                opt_result.results.append(OptimizationResult(params=params, backtest=bt))
+
+        print(f"\n  Completed {total} backtests in {elapsed:.1f}s "
+              f"({total/elapsed:.1f} backtests/sec)")
 
         # Phase 2: Walk-Forward validation on top N results
         if validate:
@@ -242,7 +350,7 @@ class ParameterOptimizer:
         """Print optimization results summary"""
         print(f"\n{'='*90}")
         print(f"OPTIMIZATION RESULTS: {result.strategy_name}")
-        print(f"  Tested: {result.total_combinations} parameter combinations")
+        print(f"  Tested: {result.total_combinations} combinations in {result.elapsed_seconds:.1f}s")
         print(f"{'='*90}")
 
         # Sort by composite score
@@ -258,7 +366,7 @@ class ParameterOptimizer:
               f"{'WF-Eff':>7s} {'Robust':>6s} {'Score':>7s} | Parameters")
         print("-" * 110)
 
-        for i, r in enumerate(valid[:15]):
+        for i, r in enumerate(valid[:20]):
             wf_eff = f"{r.wf_efficiency:.2f}" if r.walk_forward else "  --"
             robust = "YES" if r.wf_robust else ("NO" if r.walk_forward else "--")
 

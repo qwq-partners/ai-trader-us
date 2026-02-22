@@ -18,6 +18,7 @@ from ..core.types import (
 from ..core.event import MarketDataEvent
 from ..execution.broker.paper import PaperBroker
 from ..strategies.base import BaseStrategy
+from ..indicators.technical import compute_indicators_all
 
 
 @dataclass
@@ -93,14 +94,20 @@ class BacktestEngine:
         # Collect all dates across symbols
         # Keep full data for history/indicators, only filter simulation dates
         all_dates = set()
+        # Build date-to-row-index mapping for fast lookups
+        date_idx_map: Dict[str, Dict] = {}  # symbol -> {date -> row_index}
+
         for symbol, df in data.items():
+            date_idx_map[symbol] = {}
             dates = df.index.date if hasattr(df.index, 'date') else df.index
-            for d in dates:
-                if start_date and d < start_date:
+            for i, d in enumerate(dates):
+                d_val = d if not hasattr(d, 'date') else d
+                date_idx_map[symbol][d_val] = i
+                if start_date and d_val < start_date:
                     continue
-                if end_date and d > end_date:
+                if end_date and d_val > end_date:
                     continue
-                all_dates.add(d)
+                all_dates.add(d_val)
 
         sorted_dates = sorted(all_dates)
         if not sorted_dates:
@@ -112,6 +119,11 @@ class BacktestEngine:
             f"Backtest: {strat_names} | {len(data)} symbols | "
             f"{sorted_dates[0]} ~ {sorted_dates[-1]} | ${initial_capital:,.0f}"
         )
+
+        # Pre-compute all indicators for all symbols (massive speed boost)
+        precomputed: Dict[str, pd.DataFrame] = {}
+        for symbol, df in data.items():
+            precomputed[symbol] = compute_indicators_all(df)
 
         trades: List[TradeResult] = []
         equity_curve: List[Dict] = []
@@ -127,10 +139,11 @@ class BacktestEngine:
             signals: List[Signal] = []
 
             for symbol, df in data.items():
-                if ts not in df.index:
+                row_idx = date_idx_map[symbol].get(current_date)
+                if row_idx is None:
                     continue
 
-                bar = df.loc[ts]
+                bar = df.iloc[row_idx]
                 close = Decimal(str(bar['close']))
 
                 # Update existing position prices
@@ -140,17 +153,29 @@ class BacktestEngine:
                     if pos.highest_price is None or close > pos.highest_price:
                         pos.highest_price = close
 
-                # Build price history for strategy
-                hist = df.loc[:ts]
+                # Get pre-computed indicators (O(1) lookup instead of full recompute)
+                ind_row = precomputed[symbol].iloc[row_idx]
+                indicators = {}
+                for k, v in ind_row.items():
+                    if pd.notna(v):
+                        indicators[k] = int(v) if k == 'volume' else float(v)
 
-                # Generate signals from ALL strategies
+                # Build history slice for strategies that need raw bars
+                # iloc creates a view (O(1)), not a copy
+                hist = df.iloc[:row_idx + 1]
+
+                # Generate signals from ALL strategies (bypass evaluate() overhead)
                 for strat in strategy_list:
-                    signal = strat.evaluate(symbol, hist, portfolio)
-                    if signal:
+                    if not strat.enabled or len(hist) < 20:
+                        continue
+                    signal = strat.generate_signal(symbol, indicators, hist, portfolio)
+                    if signal and signal.score >= strat.min_score:
                         signals.append(signal)
 
             # Check exits first (using strategy that opened each position)
-            exit_trades = self._check_exits_multi(strategy_list, portfolio, data, ts)
+            exit_trades = self._check_exits_multi(
+                strategy_list, portfolio, data, ts, date_idx_map
+            )
             trades.extend(exit_trades)
 
             # Process entry signals (sorted by score, highest first)
@@ -288,16 +313,26 @@ class BacktestEngine:
         return True
 
     def _check_exits_multi(self, strategies: List[BaseStrategy], portfolio: Portfolio,
-                           data: Dict[str, pd.DataFrame], ts: pd.Timestamp) -> List[TradeResult]:
+                           data: Dict[str, pd.DataFrame], ts: pd.Timestamp,
+                           date_idx_map: Dict[str, Dict] = None) -> List[TradeResult]:
         """Check exit conditions for all positions using the strategy that opened each"""
         trades = []
 
         for symbol in list(portfolio.positions.keys()):
             pos = portfolio.positions[symbol]
-            if symbol not in data or ts not in data[symbol].index:
+            if symbol not in data:
                 continue
 
-            bar = data[symbol].loc[ts]
+            # Use fast index lookup
+            row_idx = None
+            if date_idx_map and symbol in date_idx_map:
+                current_date = ts.date() if hasattr(ts, 'date') else ts
+                row_idx = date_idx_map[symbol].get(current_date)
+            if row_idx is None:
+                continue
+
+            df = data[symbol]
+            bar = df.iloc[row_idx]
             current_price = Decimal(str(bar['close']))
             low_price = Decimal(str(bar['low']))
             pos.current_price = current_price
@@ -337,7 +372,7 @@ class BacktestEngine:
 
             # Strategy custom exit (use owning strategy)
             if not exit_reason:
-                hist = data[symbol].loc[:ts]
+                hist = df.iloc[:row_idx + 1]
                 exit_signal = owning_strategy.check_exit(symbol, hist, pos)
                 if exit_signal:
                     exit_reason = exit_signal

@@ -181,3 +181,63 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, Any]:
     indicators['volume'] = int(v.iloc[-1])
 
     return indicators
+
+
+def compute_indicators_all(df: pd.DataFrame) -> pd.DataFrame:
+    """Pre-compute all indicators for every row in the DataFrame.
+
+    Much faster than calling compute_indicators() per-row.
+    Used by BacktestEngine for bulk pre-computation.
+
+    Returns DataFrame with indicator columns, same index as input.
+    """
+    if len(df) < 20:
+        return pd.DataFrame(index=df.index)
+
+    c = df['close'].astype(float)
+    h = df['high'].astype(float)
+    l = df['low'].astype(float)
+    v = df['volume'].astype(float)
+
+    result = pd.DataFrame(index=df.index)
+    result['close'] = c
+    result['volume'] = v
+
+    # Moving averages
+    for p in [5, 10, 20, 50, 150, 200]:
+        result[f'ma{p}'] = sma(c, p)
+
+    # RSI
+    result['rsi'] = rsi(c, 14)
+    result['rsi2'] = rsi(c, 2)
+
+    # ATR
+    atr_series = atr(h, l, c, 14)
+    result['atr'] = atr_series
+    result['atr_pct'] = atr_series / c * 100
+
+    # VWAP (20-bar)
+    result['vwap'] = vwap(h, l, c, v, period=20)
+
+    # Volume ratio
+    result['vol_ratio'] = volume_ratio(v, 20)
+
+    # 20-day highs/lows
+    h20, l20 = high_low_range(h, l, 20)
+    result['high_20d'] = h20
+    result['low_20d'] = l20
+    result['prev_high_20d'] = h20.shift(1)
+    result['prev_low_20d'] = l20.shift(1)
+
+    # 52-week highs/lows
+    h52, l52 = high_low_range(h, l, 252)
+    result['high_52w'] = h52
+    result['low_52w'] = l52
+    result['pct_from_52w_high'] = (c - h52) / h52 * 100
+    result['pct_from_52w_low'] = (c - l52) / l52 * 100
+
+    # Price momentum
+    for days in [1, 5, 20]:
+        result[f'change_{days}d'] = c.pct_change(days) * 100
+
+    return result
