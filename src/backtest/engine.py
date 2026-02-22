@@ -28,6 +28,11 @@ class BacktestResult:
     daily_returns: List[float] = field(default_factory=list)
     portfolio: Optional[Portfolio] = None
 
+    # Benchmark comparison
+    benchmark_curve: List[Dict] = field(default_factory=list)
+    benchmark_return_pct: float = 0.0
+    alpha: float = 0.0  # Strategy return - benchmark return
+
     # Computed metrics
     total_return_pct: float = 0.0
     max_drawdown_pct: float = 0.0
@@ -56,6 +61,7 @@ class BacktestEngine:
         start_date: date = None,
         end_date: date = None,
         strategies: List[BaseStrategy] = None,
+        benchmark: str = "SPY",
     ) -> BacktestResult:
         """
         Run backtest with one or multiple strategies.
@@ -196,12 +202,17 @@ class BacktestEngine:
         # Compute metrics
         self._compute_metrics(result, initial_capital)
 
+        # Compute benchmark comparison
+        if benchmark and sorted_dates:
+            self._compute_benchmark(result, benchmark, data, sorted_dates, initial_capital)
+
         logger.info(
             f"Result: {result.total_trades} trades | "
             f"Return: {result.total_return_pct:+.1f}% | "
             f"MaxDD: {result.max_drawdown_pct:.1f}% | "
             f"Sharpe: {result.sharpe_ratio:.2f} | "
-            f"WinRate: {result.win_rate:.0f}%"
+            f"WinRate: {result.win_rate:.0f}% | "
+            f"Alpha: {result.alpha:+.1f}%"
         )
 
         return result
@@ -374,6 +385,59 @@ class BacktestEngine:
         del portfolio.positions[pos.symbol]
 
         return trade
+
+    def _compute_benchmark(self, result: BacktestResult, benchmark: str,
+                           data: Dict[str, pd.DataFrame], sorted_dates: list,
+                           initial_capital: float):
+        """Compute benchmark buy-and-hold comparison"""
+        # Try to get benchmark from existing data, or download
+        bench_df = data.get(benchmark)
+        if bench_df is None:
+            try:
+                from ..data.providers.yfinance_provider import YFinanceProvider
+                from ..data.store import DataStore
+                provider = YFinanceProvider()
+                store = DataStore()
+                bench_df = store.load(benchmark, 'daily')
+                if bench_df is None or bench_df.empty:
+                    bench_df = provider.get_daily_bars(
+                        benchmark, sorted_dates[0], sorted_dates[-1]
+                    )
+                    if not bench_df.empty:
+                        store.save(benchmark, bench_df, 'daily')
+            except Exception as e:
+                logger.debug(f"Could not load benchmark {benchmark}: {e}")
+                return
+
+        if bench_df is None or bench_df.empty:
+            return
+
+        # Calculate buy-and-hold equity curve
+        benchmark_curve = []
+        first_price = None
+
+        for current_date in sorted_dates:
+            ts = pd.Timestamp(current_date)
+            if ts not in bench_df.index:
+                continue
+
+            price = float(bench_df.loc[ts, 'close'])
+            if first_price is None:
+                first_price = price
+
+            bench_equity = initial_capital * (price / first_price)
+            benchmark_curve.append({
+                'date': current_date,
+                'equity': bench_equity,
+                'price': price,
+            })
+
+        if benchmark_curve:
+            result.benchmark_curve = benchmark_curve
+            result.benchmark_return_pct = (
+                (benchmark_curve[-1]['equity'] - initial_capital) / initial_capital * 100
+            )
+            result.alpha = result.total_return_pct - result.benchmark_return_pct
 
     def _compute_metrics(self, result: BacktestResult, initial_capital: float):
         """Compute performance metrics"""

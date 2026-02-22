@@ -71,6 +71,14 @@ def print_results(result, title, start, end, n_symbols, capital):
     print(f"Win Rate:        {result.win_rate:.0f}%")
     print(f"Profit Factor:   {result.profit_factor:.2f}")
     print(f"Avg Trade PnL:   {result.avg_trade_pnl_pct:+.2f}%")
+
+    # Benchmark comparison
+    if result.benchmark_curve:
+        print(f"")
+        print(f"SPY Buy&Hold:    {result.benchmark_return_pct:+.1f}%")
+        print(f"Alpha:           {result.alpha:+.1f}%")
+        beat = "OUTPERFORM" if result.alpha > 0 else "UNDERPERFORM"
+        print(f"vs Benchmark:    {beat}")
     print("=" * 70)
 
     if result.trades:
@@ -202,7 +210,10 @@ def main():
         )
         report_path = BacktestReport.generate(
             result.equity_curve, result.trades, metrics,
-            title=f"{title} Backtest"
+            title=f"{title} Backtest",
+            benchmark_curve=result.benchmark_curve,
+            benchmark_return_pct=result.benchmark_return_pct,
+            alpha=result.alpha,
         )
         logger.info(f"Report saved: {report_path}")
 
