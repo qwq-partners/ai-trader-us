@@ -1,0 +1,118 @@
+# AI Trader US - Default Configuration
+
+trading:
+  initial_capital: 100000       # $100K
+  market: US
+
+  commission:
+    type: zero                  # zero (Alpaca), per_share (IB)
+    rate: 0.0
+    min: 0.0
+
+  slippage:
+    model: percentage
+    rate: 0.05                  # 0.05%
+
+  enable_pre_market: false
+  enable_after_hours: false
+
+risk:
+  daily_max_loss_pct: 3.0       # -3% daily loss limit
+  max_positions: 10
+  base_position_pct: 10.0       # 10% per position
+  max_position_pct: 15.0        # 15% max per position
+  min_cash_reserve_pct: 10.0    # Keep 10% cash
+  min_position_value: 1000      # Min $1,000 per trade
+  max_positions_per_sector: 3
+
+  stop_loss_pct: 3.0
+  take_profit_pct: 6.0
+  trailing_stop_pct: 2.0
+
+  consecutive_loss_threshold: 3
+  consecutive_loss_size_factor: 0.5
+
+strategies:
+  orb:
+    enabled: true
+    time_horizon: day
+    or_period_minutes: 30       # 09:30-10:00 ET
+    min_or_range_pct: 0.5
+    max_or_range_pct: 3.0
+    volume_confirm_ratio: 1.5
+    min_score: 65
+    stop_loss_pct: 1.5
+    take_profit_r: 2.0          # 2R target
+
+  momentum:
+    enabled: true
+    time_horizon: swing
+    breakout_period: 20         # 20-day high breakout
+    min_breakout_pct: 0.3       # Lower threshold for more signals
+    volume_surge_ratio: 1.5     # 1.5x avg volume (mega caps don't surge as much)
+    min_score: 60
+    stop_loss_pct: 4.0
+    take_profit_pct: 10.0
+
+  vwap_bounce:
+    enabled: true
+    time_horizon: day
+    reclaim_confirm_bars: 3
+    min_volume_ratio: 1.5
+    min_score: 65
+    stop_loss_atr_mult: 0.5
+    take_profit_atr_mult: 1.5
+
+  sepa:
+    enabled: true
+    time_horizon: swing
+    min_score: 70
+    stop_loss_pct: 5.0
+    take_profit_pct: 15.0
+    max_holding_days: 20
+    min_rs_rating: 70
+
+  earnings_drift:
+    enabled: true
+    time_horizon: swing
+    min_eps_surprise_pct: 10
+    min_gap_pct: 5.0
+    min_revenue_growth_pct: 15
+    min_score: 70
+    stop_loss_pct: 8.0
+    max_holding_days: 20
+
+universe:
+  pools:
+    - sp500
+    - sp400
+  min_price: 5.0
+  min_avg_volume_usd: 5000000
+  min_market_cap_mm: 300
+
+exit_manager:
+  enable_partial_exit: true
+
+  first_exit_pct: 3.0
+  first_exit_ratio: 0.40
+
+  second_exit_pct: 6.0
+  second_exit_ratio: 0.50
+
+  third_exit_pct: 10.0
+  third_exit_ratio: 0.50
+
+  stop_loss_pct: 3.0
+  trailing_stop_pct: 2.0
+  trailing_activate_pct: 3.0
+
+  enable_dynamic_stop: true
+  atr_multiplier: 2.0
+  min_stop_pct: 2.0
+  max_stop_pct: 6.0
+
+  eod_close: true               # Close day trades by 15:45 ET
+
+backtest:
+  default_period_years: 3
+  benchmark: SPY

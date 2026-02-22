@@ -1,0 +1,372 @@
+"""
+AI Trader US - Backtest Engine
+
+Event-driven backtesting engine. Replays historical data through strategies.
+"""
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import List, Dict, Optional, Type
+import pandas as pd
+from loguru import logger
+
+from ..core.types import (
+    Order, Fill, Position, Portfolio, Signal, TradeResult,
+    OrderSide, OrderStatus, PositionSide, TradingConfig, TimeHorizon
+)
+from ..core.event import MarketDataEvent
+from ..execution.broker.paper import PaperBroker
+from ..strategies.base import BaseStrategy
+
+
+@dataclass
+class BacktestResult:
+    """Backtest result container"""
+    trades: List[TradeResult] = field(default_factory=list)
+    equity_curve: List[Dict] = field(default_factory=list)
+    daily_returns: List[float] = field(default_factory=list)
+    portfolio: Optional[Portfolio] = None
+
+    # Computed metrics
+    total_return_pct: float = 0.0
+    max_drawdown_pct: float = 0.0
+    sharpe_ratio: float = 0.0
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    total_trades: int = 0
+    avg_trade_pnl_pct: float = 0.0
+
+
+class BacktestEngine:
+    """Event-driven backtest engine"""
+
+    def __init__(self, config: TradingConfig = None):
+        self._config = config or TradingConfig()
+        self._broker = PaperBroker(
+            commission=self._config.commission,
+            slippage=self._config.slippage,
+        )
+
+    def run(
+        self,
+        strategy: BaseStrategy,
+        data: Dict[str, pd.DataFrame],
+        initial_capital: float = 100_000,
+        start_date: date = None,
+        end_date: date = None,
+    ) -> BacktestResult:
+        """
+        Run backtest.
+
+        Args:
+            strategy: Strategy instance
+            data: Dict of {symbol: DataFrame(OHLCV)} with DatetimeIndex
+            initial_capital: Starting capital in USD
+            start_date: Start date (None = use all data)
+            end_date: End date (None = use all data)
+        """
+        portfolio = Portfolio(
+            cash=Decimal(str(initial_capital)),
+            initial_capital=Decimal(str(initial_capital)),
+        )
+
+        # Collect all dates across symbols
+        all_dates = set()
+        for symbol, df in data.items():
+            if start_date:
+                df = df[df.index >= pd.Timestamp(start_date)]
+            if end_date:
+                df = df[df.index <= pd.Timestamp(end_date)]
+            data[symbol] = df
+            all_dates.update(df.index.date if hasattr(df.index, 'date') else df.index)
+
+        sorted_dates = sorted(all_dates)
+        if not sorted_dates:
+            logger.warning("No data to backtest")
+            return BacktestResult()
+
+        logger.info(
+            f"Backtest: {strategy.name} | {len(data)} symbols | "
+            f"{sorted_dates[0]} ~ {sorted_dates[-1]} | ${initial_capital:,.0f}"
+        )
+
+        trades: List[TradeResult] = []
+        equity_curve: List[Dict] = []
+        prev_equity = Decimal(str(initial_capital))
+        daily_returns: List[float] = []
+
+        # Day-by-day simulation
+        for current_date in sorted_dates:
+            ts = pd.Timestamp(current_date)
+            portfolio.reset_daily()
+
+            # Process each symbol's data for this date
+            signals: List[Signal] = []
+
+            for symbol, df in data.items():
+                if ts not in df.index:
+                    continue
+
+                bar = df.loc[ts]
+                close = Decimal(str(bar['close']))
+
+                # Update existing position prices
+                if symbol in portfolio.positions:
+                    pos = portfolio.positions[symbol]
+                    pos.current_price = close
+                    if pos.highest_price is None or close > pos.highest_price:
+                        pos.highest_price = close
+
+                # Build price history for strategy
+                hist = df.loc[:ts]
+
+                # Generate signal
+                signal = strategy.evaluate(symbol, hist, portfolio)
+                if signal:
+                    signals.append(signal)
+
+            # Check exits first
+            exit_trades = self._check_exits(strategy, portfolio, data, ts)
+            trades.extend(exit_trades)
+
+            # Process entry signals (sorted by score, highest first)
+            signals.sort(key=lambda s: s.score, reverse=True)
+            for signal in signals:
+                if not signal.is_buy:
+                    continue
+                if signal.symbol in portfolio.positions:
+                    continue  # Already holding
+
+                # Position sizing
+                trade_result = self._execute_entry(
+                    signal, portfolio, data, ts
+                )
+                # Entry executed if position was added
+
+            # Record daily equity
+            equity = portfolio.total_equity
+            daily_ret = float((equity - prev_equity) / prev_equity * 100) if prev_equity > 0 else 0
+            daily_returns.append(daily_ret)
+            prev_equity = equity
+
+            equity_curve.append({
+                'date': current_date,
+                'equity': float(equity),
+                'cash': float(portfolio.cash),
+                'positions': len(portfolio.positions),
+                'daily_return': daily_ret,
+            })
+
+        # Close remaining positions at last known prices
+        for symbol in list(portfolio.positions.keys()):
+            pos = portfolio.positions[symbol]
+            trade = self._close_position(portfolio, pos, pos.current_price,
+                                         datetime.combine(sorted_dates[-1], datetime.min.time()),
+                                         "end_of_backtest")
+            if trade:
+                trades.append(trade)
+
+        # Build result
+        result = BacktestResult(
+            trades=trades,
+            equity_curve=equity_curve,
+            daily_returns=daily_returns,
+            portfolio=portfolio,
+            total_trades=len(trades),
+        )
+
+        # Compute metrics
+        self._compute_metrics(result, initial_capital)
+
+        logger.info(
+            f"Result: {result.total_trades} trades | "
+            f"Return: {result.total_return_pct:+.1f}% | "
+            f"MaxDD: {result.max_drawdown_pct:.1f}% | "
+            f"Sharpe: {result.sharpe_ratio:.2f} | "
+            f"WinRate: {result.win_rate:.0f}%"
+        )
+
+        return result
+
+    def _execute_entry(self, signal: Signal, portfolio: Portfolio,
+                       data: Dict[str, pd.DataFrame], ts: pd.Timestamp) -> bool:
+        """Execute entry signal"""
+        symbol = signal.symbol
+        if symbol not in data or ts not in data[symbol].index:
+            return False
+
+        bar = data[symbol].loc[ts]
+        price = Decimal(str(bar['close']))
+
+        # Position sizing
+        risk_cfg = self._config.risk
+        max_position_value = portfolio.total_equity * Decimal(str(risk_cfg.max_position_pct / 100))
+        base_position_value = portfolio.total_equity * Decimal(str(risk_cfg.base_position_pct / 100))
+        min_cash = portfolio.total_equity * Decimal(str(risk_cfg.min_cash_reserve_pct / 100))
+
+        available_cash = portfolio.cash - min_cash
+        if available_cash < Decimal(str(risk_cfg.min_position_value)):
+            return False
+
+        # Check max positions
+        if len(portfolio.positions) >= risk_cfg.max_positions:
+            return False
+
+        # Check sector limit
+        if risk_cfg.max_positions_per_sector > 0 and signal.metadata.get('sector'):
+            sector = signal.metadata['sector']
+            sector_count = sum(
+                1 for p in portfolio.positions.values()
+                if p.sector == sector
+            )
+            if sector_count >= risk_cfg.max_positions_per_sector:
+                return False
+
+        position_value = min(base_position_value, available_cash, max_position_value)
+        quantity = int(position_value / price)
+        if quantity <= 0:
+            return False
+
+        # Execute via paper broker
+        order = Order(
+            symbol=symbol, side=OrderSide.BUY, quantity=quantity,
+            price=price, strategy=signal.strategy.value,
+            signal_score=signal.score, reason=signal.reason,
+        )
+
+        fill = self._broker.execute_order(order, price, ts.to_pydatetime())
+        if not fill:
+            return False
+
+        # Create position
+        pos = Position(
+            symbol=symbol, quantity=fill.quantity,
+            avg_price=fill.price, current_price=fill.price,
+            highest_price=fill.price,
+            strategy=signal.strategy.value,
+            entry_time=fill.timestamp,
+            sector=signal.metadata.get('sector'),
+            stop_loss=signal.stop_price,
+            take_profit=signal.target_price,
+            side=PositionSide.LONG,
+            time_horizon=signal.metadata.get('time_horizon'),
+        )
+
+        portfolio.positions[symbol] = pos
+        portfolio.cash -= fill.total_cost
+        portfolio.daily_trades += 1
+
+        return True
+
+    def _check_exits(self, strategy: BaseStrategy, portfolio: Portfolio,
+                     data: Dict[str, pd.DataFrame], ts: pd.Timestamp) -> List[TradeResult]:
+        """Check exit conditions for all positions"""
+        trades = []
+
+        for symbol in list(portfolio.positions.keys()):
+            pos = portfolio.positions[symbol]
+            if symbol not in data or ts not in data[symbol].index:
+                continue
+
+            bar = data[symbol].loc[ts]
+            current_price = Decimal(str(bar['close']))
+            low_price = Decimal(str(bar['low']))
+            pos.current_price = current_price
+
+            exit_reason = None
+
+            # Stop loss (check against low)
+            if pos.stop_loss and low_price <= pos.stop_loss:
+                exit_reason = "stop_loss"
+                current_price = pos.stop_loss  # Assume filled at stop
+
+            # Take profit
+            elif pos.take_profit and current_price >= pos.take_profit:
+                exit_reason = "take_profit"
+
+            # Trailing stop
+            elif pos.trailing_stop_pct and pos.highest_price:
+                trail_price = pos.highest_price * (1 - Decimal(str(pos.trailing_stop_pct / 100)))
+                if low_price <= trail_price:
+                    exit_reason = "trailing_stop"
+                    current_price = trail_price
+
+            # Day trade EOD close
+            elif pos.time_horizon == TimeHorizon.DAY:
+                if pos.entry_time and pos.entry_time.date() < ts.date():
+                    exit_reason = "eod_close"
+
+            # Max holding days (swing)
+            elif pos.entry_time:
+                holding_days = (ts.to_pydatetime() - pos.entry_time).days
+                max_days = strategy.config.get('max_holding_days', 20)
+                if holding_days >= max_days:
+                    exit_reason = "max_holding"
+
+            # Strategy custom exit
+            if not exit_reason:
+                hist = data[symbol].loc[:ts]
+                exit_signal = strategy.check_exit(symbol, hist, pos)
+                if exit_signal:
+                    exit_reason = exit_signal
+
+            if exit_reason:
+                trade = self._close_position(
+                    portfolio, pos, current_price,
+                    ts.to_pydatetime(), exit_reason
+                )
+                if trade:
+                    trades.append(trade)
+
+        return trades
+
+    def _close_position(self, portfolio: Portfolio, pos: Position,
+                        exit_price: Decimal, timestamp: datetime,
+                        reason: str) -> Optional[TradeResult]:
+        """Close a position and record trade"""
+        order = Order(
+            symbol=pos.symbol, side=OrderSide.SELL,
+            quantity=pos.quantity, price=exit_price,
+            strategy=pos.strategy, reason=reason,
+        )
+
+        fill = self._broker.execute_order(order, exit_price, timestamp)
+        if not fill:
+            return None
+
+        trade = TradeResult(
+            symbol=pos.symbol,
+            side=OrderSide.BUY,
+            entry_price=pos.avg_price,
+            exit_price=fill.price,
+            quantity=pos.quantity,
+            entry_time=pos.entry_time or timestamp,
+            exit_time=timestamp,
+            strategy=pos.strategy or "",
+            reason=reason,
+            commission=fill.commission,
+        )
+
+        # Update portfolio
+        portfolio.cash += fill.total_value - fill.commission
+        portfolio.daily_pnl += trade.pnl
+        del portfolio.positions[pos.symbol]
+
+        return trade
+
+    def _compute_metrics(self, result: BacktestResult, initial_capital: float):
+        """Compute performance metrics"""
+        from ..backtest.metrics import PerformanceMetrics
+        metrics = PerformanceMetrics.compute(
+            trades=result.trades,
+            equity_curve=result.equity_curve,
+            daily_returns=result.daily_returns,
+            initial_capital=initial_capital,
+        )
+        result.total_return_pct = metrics.get('total_return_pct', 0)
+        result.max_drawdown_pct = metrics.get('max_drawdown_pct', 0)
+        result.sharpe_ratio = metrics.get('sharpe_ratio', 0)
+        result.win_rate = metrics.get('win_rate', 0)
+        result.profit_factor = metrics.get('profit_factor', 0)
+        result.avg_trade_pnl_pct = metrics.get('avg_trade_pnl_pct', 0)
