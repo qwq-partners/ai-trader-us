@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-02-28 — 코드리뷰 + 서비스 등록 + 버그 수정
+
+**버그 수정 (commit `3884055`):**
+- P1: 빈 `order_no` 충돌 — KIS ODNO="" 시 `local-{uuid}` 폴백 키 사용 (매수/매도)
+- P2: `pending` 상태 주문 타임아웃 미작동 — 폴백키 5분 / 정상 pending 10분 경고
+
+**인프라 (commit `b8275fd`):**
+- S&P 500/400 Wikipedia 403 차단 수정 — requests User-Agent + 로컬 캐시(7일 만료)
+- `data/universe/sp500.txt` (503종목), `sp400.txt` (400종목)
+- `.gitignore`: `/data/` 루트 전용으로 수정 (src/data/ 오배제 수정)
+- `requirements.txt`: lxml 추가
+
+**서비스 (외부):**
+- `ai-trader-us.service` systemd 서비스 등록 + enabled (부팅 자동 시작)
+- 테스트 결과: Alpaca Paper 브로커 연결 ✅, 5전략 로드 ✅, 유니버스 903종목 ✅
+
+---
+
 ## 2026-02-28 — Live Trading 테스트 셋업
 
 **신규 파일:**
