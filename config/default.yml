@@ -48,11 +48,11 @@ strategies:
     enabled: true
     time_horizon: swing
     breakout_period: 20         # 20-day high breakout
-    min_breakout_pct: 0.3       # Lower threshold for more signals
-    volume_surge_ratio: 1.5     # 1.5x avg volume (mega caps don't surge as much)
-    min_score: 60
-    stop_loss_pct: 4.0
-    take_profit_pct: 10.0
+    min_breakout_pct: 0.3       # Grid Search optimal (1280 combos)
+    volume_surge_ratio: 1.2     # 1.2x — low bar captures more breakouts
+    min_score: 50               # Wider funnel, score handles quality
+    stop_loss_pct: 5.0          # Generous stop avoids noise exits
+    take_profit_pct: 15.0       # Let winners run (+20.8%, PF 1.94)
 
   vwap_bounce:
     enabled: true
@@ -112,6 +112,19 @@ exit_manager:
   max_stop_pct: 6.0
 
   eod_close: true               # Close day trades by 15:45 ET
+
+live:
+  broker: alpaca_paper             # alpaca_paper | kis
+  env: dev                         # prod / dev (모의)
+  screening_interval_min: 5        # 스크리닝 주기 (분) — 테스트용 단축
+  max_screen_symbols: 20           # 한 사이클 최대 스캔 종목 수
+  max_signals_per_cycle: 2         # 사이클당 최대 주문 수
+  signal_cooldown_sec: 300        # 종목당 시그널 쿨다운 (초)
+  position_sync_sec: 30           # 포트폴리오 동기화 주기
+  exit_check_sec: 60              # 청산 체크 주기
+  order_check_sec: 10             # 주문 상태 폴링 주기
+  heartbeat_sec: 300              # 하트비트 주기
+  default_exchange: NASD          # 기본 거래소 코드
 
 backtest:
   default_period_years: 3
