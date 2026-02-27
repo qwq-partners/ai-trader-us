@@ -5,6 +5,7 @@ yfinance>=0.2.36
 pandas>=2.1.0
 numpy>=1.26.0
 pyarrow>=15.0.0
+lxml>=5.0.0  # yfinance S&P 500/400 목록 파싱용
 
 # News/Sentiment
 finnhub-python>=2.4.20
