@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import uuid
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
@@ -322,7 +323,12 @@ class LiveEngine:
         result = await self.broker.submit_buy_order(symbol, exchange, qty, price=0)
 
         if result.get("success"):
-            order_no = result.get("order_no", "")
+            order_no = result.get("order_no", "").strip()
+            if not order_no:
+                # KIS가 주문번호 미반환 시 UUID 폴백 (충돌 방지)
+                order_no = f"local-{uuid.uuid4().hex[:12]}"
+                logger.warning(f"[매수 주문] {symbol} — KIS 주문번호 미반환, 폴백 사용: {order_no}")
+
             self._pending_orders[order_no] = {
                 "symbol": symbol,
                 "side": "buy",
@@ -424,7 +430,11 @@ class LiveEngine:
         result = await self.broker.submit_sell_order(symbol, exchange, sell_qty, price=0)
 
         if result.get("success"):
-            order_no = result.get("order_no", "")
+            order_no = result.get("order_no", "").strip()
+            if not order_no:
+                order_no = f"local-{uuid.uuid4().hex[:12]}"
+                logger.warning(f"[매도 주문] {symbol} — KIS 주문번호 미반환, 폴백 사용: {order_no}")
+
             self._pending_orders[order_no] = {
                 "symbol": symbol,
                 "side": "sell",
@@ -559,13 +569,23 @@ class LiveEngine:
         filled_map = {h["order_no"]: h for h in history}
 
         for order_no in list(self._pending_orders.keys()):
+            pending = self._pending_orders.get(order_no)
+            if not pending:
+                continue
+
             info = filled_map.get(order_no)
-            if not info:
-                # 오래된 주문 타임아웃 (5분)
-                pending = self._pending_orders[order_no]
+
+            # 폴백 order_no(local-xxx)는 KIS 이력에 없음 → 타임아웃 전용 처리
+            is_local = order_no.startswith("local-")
+
+            if not info or is_local:
+                # KIS 이력에 없거나 폴백 주문 → 타임아웃 (5분) 체크
                 elapsed = (datetime.now() - pending["submitted_at"]).total_seconds()
                 if elapsed > 300:
-                    logger.warning(f"[주문 체크] {order_no} 타임아웃 (5분) — 제거")
+                    logger.warning(
+                        f"[주문 체크] {order_no} ({pending['symbol']}) "
+                        f"{'폴백주문 ' if is_local else ''}타임아웃 (5분) — 제거"
+                    )
                     self._pending_symbols.discard(pending["symbol"])
                     del self._pending_orders[order_no]
                 continue
@@ -577,6 +597,14 @@ class LiveEngine:
                     f"[주문 체크] {order_no} 부분체결 "
                     f"({info['filled_qty']}/{info['qty']})"
                 )
+            elif info["status"] == "pending":
+                # 미체결 상태가 10분 이상 지속되면 경고
+                elapsed = (datetime.now() - pending["submitted_at"]).total_seconds()
+                if elapsed > 600:
+                    logger.warning(
+                        f"[주문 체크] {order_no} ({pending['symbol']}) "
+                        f"미체결 10분 경과 — 수동 확인 필요"
+                    )
 
     async def _on_order_filled(self, order_no: str, fill_info: dict):
         """주문 체결 처리"""
