@@ -2,6 +2,11 @@
 data/prices/
 data/results/
 data/universe/
+data/
+
+# OpenClaw tool artifacts
+.peon-*
+peon-ping-sound.wav
 
 # Python
 __pycache__/
