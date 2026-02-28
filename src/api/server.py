@@ -98,11 +98,20 @@ class APIServer:
             except Exception:
                 pass
 
+        # 브로커 및 운영 환경 정보 (대시보드 TEST 배지 표시용)
+        live_cfg = getattr(engine, "_live_cfg", {}) or {}
+        broker_name = live_cfg.get("broker", "kis")
+        env = live_cfg.get("env", "prod")
+        is_paper = broker_name == "alpaca_paper" or env == "dev"
+
         return web.json_response({
             "running": getattr(engine, "_running", False),
             "session": session_value,
             "timestamp": datetime.now().isoformat(),
             "version": VERSION,
+            "broker": broker_name,
+            "env": env,
+            "paper_trading": is_paper,   # True → 대시보드에서 TEST 배지 표시
         })
 
     async def _handle_portfolio(self, request: web.Request) -> web.Response:
