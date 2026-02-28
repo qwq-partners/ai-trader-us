@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-03-03 — 대시보드 TEST 배지용 상태 API 확장
+
+**commit `f74c1aa`**
+
+- `src/api/server.py`: `GET /api/us/status` 응답에 필드 3개 추가
+  - `"broker"`: 현재 브로커명 (e.g. `"alpaca_paper"`)
+  - `"env"`: 운영 환경 (`"dev"` | `"prod"`)
+  - `"paper_trading"`: 모의거래 여부 (`true` | `false`)
+- 이 필드를 기반으로 ai-trader-v2 대시보드가 TEST/모의 배지 자동 표시
+- KIS 실계좌 전환 시 `env: "prod"` → 배지 자동 제거 (코드 변경 불필요)
+
+```json
+// 현재 응답 예시
+{
+  "running": true,
+  "session": "closed",
+  "broker": "alpaca_paper",
+  "env": "dev",
+  "paper_trading": true
+}
+```
+
+---
+
 ## 2026-02-28 — HTTP API 서버 추가 (Phase 1)
 
 **API 서버 (포트 8081):**
