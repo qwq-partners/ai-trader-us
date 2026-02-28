@@ -1,5 +1,115 @@
 # Changelog
 
+## 2026-02-28 — 2차 코드리뷰 수정 (5건)
+
+- `live_engine.py`: 전량 매도 체결 시 `positions.pop()` 누락 → 반복 매도 방지
+- `live_engine.py`: 일일 손실 경고 `-2.0%` 하드코딩 → `daily_max_loss_pct * 0.67` 동적 계산
+- `live_engine.py`: `_ws_last_exit_check` 포지션 청산 시 정리 로직 추가 (메모리 누수 방지)
+- `live_engine.py`: `_eod_close_loop` `date.today()` → `self.session.now_et().date()` (KST/ET 불일치 수정)
+- `live_engine.py`: `_heartbeat_loop` `date.today()` → `self.session.now_et().date()` (동일)
+
+---
+
+## 2026-02-28 — P0-P1 종합 버그 수정 (코드리뷰 19건)
+
+**P0 (치명적) 8건:**
+- `live_engine.py`: 매도 체결 시 `daily_pnl` 미갱신 + `reset_daily()` 미호출 → 일일 손실 한도 무력화 수정
+- `live_engine.py`: `_sync_portfolio`에서 pending 종목 무시 없이 포지션 제거 → pending 체크 추가
+- `live_engine.py`: 주문 취소 실패 시 pending 영구 블로킹 → 강제 해제 추가
+- `live_engine.py`: `asyncio.gather(return_exceptions=True)` → 태스크 모니터링 루프 (크래시 감지 + 재시작)
+- `live_engine.py`: 1주 포지션 분할매도 시 전량 청산 → ratio < 1.0이면 스킵
+- `base.py`: `Decimal(str(price)) if price else None` falsy 패턴 → `is not None` 수정
+- `health_monitor.py`: `daily_loss_limit_pct` → `daily_max_loss_pct` 속성명 수정
+- `live_engine.py`: 히스토리 다운로드 365일 → 500일 (SEPA MA200 충분한 마진)
+
+**P1 (중요) 8건:**
+- `live_engine.py`: 매수 체결/sync 시 `highest_price` 미초기화 → 트레일링 스탑 활성화
+- `live_engine.py`: 기존 포지션 exchange 캐시 미갱신 수정
+- `live_engine.py`: EOD 청산 지정가 → 시장가 전환 (미체결 위험 제거)
+- `live_engine.py`: `_execute_exit` pending 체크 추가 (레이스 컨디션 방지)
+- `live_engine.py`: `_check_orders` KST/ET 날짜 불일치 → ET 날짜로 조회
+- `live_engine.py`: `_indicator_cache.clear()` → 보유 종목 캐시 보존
+- `live_engine.py`: 시장가 폴백 실패 시 텔레그램 긴급 알림 추가
+- `live_engine.py` + `config/default.yml`: `max_price: 200.0` 고가 종목 필터 추가
+
+**P1 (기타) 3건:**
+- `types.py`: RiskConfig 기본값을 실제 config에 맞게 조정 (max_positions=4, base_position_pct=25.0 등)
+- `exit_manager.py`: 분할매도 85% 설계 의도 주석 추가
+- P1-11 (SEPA RS Rating): sepa.py에서 미사용 확인 → 코드 변경 불필요
+
+**수정 파일**: `live_engine.py`, `types.py`, `base.py`, `health_monitor.py`, `exit_manager.py`, `config/default.yml`
+
+---
+
+## 2026-02-28 — 손절 매도 시장가 폴백 + 시세 폴링 강화
+
+**매도 타임아웃 분리 + 시장가 폴백 (`src/core/live_engine.py`):**
+- 매수 미체결: 10분 → 자동 취소 (기존과 동일)
+- 매도 미체결: **2분 → 취소 → 시장가 폴백 재주문** (손절 지연 방지)
+- 시장가 폴백 주문도 pending 추적에 등록
+
+**WS/REST 이중화 강화:**
+- `_exit_check_loop`: WS 연결 시 60초, **WS 미연결 시 30초**로 폴링 단축
+- Heartbeat에 `ws=connected/disconnected` 상태 표시 추가
+
+---
+
+## 2026-02-28 — 코드리뷰 P0/P1/P2 수정
+
+**P0 (치명적):**
+- `live_engine.py`: 매도 체결 시 `pos` 미초기화 → NameError 크래시 수정 (else 분기 최상단으로 이동)
+- `live_engine.py`: 매도 주문가 0일 때 시장가 오발주 방지 가드 추가
+- `live_engine.py`: `_sync_portfolio`에서 pending 종목 수량 업데이트 스킵 (부분매도 경쟁 방지)
+
+**P1 (중요):**
+- `exit_manager.py`: `highest_price` falsy 패턴 수정 (`and` → `is not None and`)
+- `live_engine.py`: 지정가 산출 `float` → `Decimal` 정밀 계산으로 전환
+- `live_engine.py`: `cancel_order` qty=0 → 원주문 수량 전달로 수정
+- `finnhub_ws.py`: `_connect_and_listen` finally에서 `_cleanup` 중복 호출 제거 (인라인 정리)
+
+**P2 (경미):**
+- `live_engine.py`: `import time` 함수 내부 → 최상단으로 이동
+- `finnhub_ws.py`: 재연결 성공 후 백오프 기본값 리셋 추가
+
+---
+
+## 2026-02-28 — KIS 실전 전환 + Finnhub WS + 지정가 주문 + 엔진 강화
+
+**KIS 실전 브로커 전환:**
+- `config/default.yml`: broker `alpaca_paper` → `kis`, env `dev` → `prod`
+- `.env`: `KIS_ENV=dev` → `KIS_ENV=prod`
+- 포지션 사이징: base 10→25%, max 15→35%, max_positions 10→4 ($700 자본 기준)
+- 전략: ORB/VWAP 비활성화, Momentum/SEPA/EarningsDrift 유지
+- 스크리닝 주기: 30분→15분, initial_capital: $100K→$700, min_position_value: $1000→$50
+
+**지정가 주문 로직 (`src/core/live_engine.py`):**
+- 매수: `price=0` (시장가) → `price=round(price*1.002, 2)` (현재가+0.2% 지정가)
+- 매도: `price=0` → `price=round(position.current_price, 2)` (현재가 지정가)
+- 주문 기록 order_type: `market` → `limit`
+
+**미체결 주문 자동 취소 + 부분매도 수량 동기화:**
+- `_check_orders()`: 미체결 10분 경과 시 `broker.cancel_order()` 자동 호출
+  - 취소 성공 시 `_pending_orders`, `_pending_symbols` 정리
+  - local-xxx 폴백 주문은 기존 5분 타임아웃 유지
+- `_on_order_filled()`: sell 체결 시 `filled_qty < pos.quantity`면 수량 차감 (부분매도)
+
+**Finnhub WebSocket 실시간 시세:**
+- 신규 `src/data/feeds/finnhub_ws.py`: FinnhubWSFeed 클래스
+  - aiohttp ws_connect, 지수 백오프 재연결 (5s→120s)
+  - 종목당 마지막 체결가만 사용 (중복 콜백 방지)
+  - subscribe/unsubscribe 동적 관리
+- `live_engine.py` 통합:
+  - `_on_ws_price()`: 실시간 가격 갱신 + 즉시 exit 체크 (종목당 10초 스로틀)
+  - `_check_exits()`: WS 연결 시 REST 가격 조회 스킵, 미연결 시 폴백
+  - 매수 체결 시 subscribe, 포지션 청산 시 unsubscribe
+  - 7번째 태스크로 Finnhub WS 추가
+
+**ExitManager falsy 패턴 수정 (`src/strategies/exit_manager.py`):**
+- L97: `if atr and avg_price > 0` → `if atr is not None and atr > 0 and avg_price > 0`
+- atr=0.0일 때 False 처리 방지
+
+---
+
 ## 2026-03-03 — 대시보드 TEST 배지용 상태 API 확장
 
 **commit `f74c1aa`**

@@ -25,6 +25,9 @@ class ExitConfig:
 
     third_exit_pct: float = 10.0
     third_exit_ratio: float = 0.50
+    # 참고: 3단계 분할매도 합계 = 약 85%.
+    # 나머지 ~15%는 trailing_stop 또는 stop_loss로 최종 청산됨.
+    # $700 소자본 시 대부분 1주 → 분할매도 스킵, trailing_stop이 전량 청산.
 
     # Stop loss
     stop_loss_pct: float = 3.0
@@ -94,7 +97,7 @@ class ExitManager:
         stop_pct = cfg.stop_loss_pct
 
         # Dynamic ATR-based stop
-        if cfg.enable_dynamic_stop and atr and avg_price > 0:
+        if cfg.enable_dynamic_stop and atr is not None and atr > 0 and avg_price > 0:
             atr_stop = atr * cfg.atr_multiplier / avg_price * 100
             stop_pct = max(cfg.min_stop_pct, min(atr_stop, cfg.max_stop_pct))
 
@@ -103,7 +106,7 @@ class ExitManager:
             return {'action': 'close', 'ratio': 1.0, 'reason': f'stop_loss ({pnl_pct:.1f}%)'}
 
         # --- Trailing stop ---
-        if position.highest_price and pnl_pct >= cfg.trailing_activate_pct:
+        if position.highest_price is not None and pnl_pct >= cfg.trailing_activate_pct:
             trail_from_high = (float(position.highest_price) - current_price) / float(position.highest_price) * 100
             if trail_from_high >= cfg.trailing_stop_pct:
                 self._exit_stages.pop(symbol, None)

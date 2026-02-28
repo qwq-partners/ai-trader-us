@@ -1,8 +1,5 @@
-# Data (루트 레벨 데이터 디렉토리만)
-/data/prices/
-/data/results/
-/data/universe/
-/data/logs/
+# Data
+/data/
 
 # OpenClaw tool artifacts
 .peon-*

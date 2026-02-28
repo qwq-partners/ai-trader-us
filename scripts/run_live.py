@@ -49,6 +49,17 @@ async def main(config_path: str, log_level: str):
     try:
         write_pid()
         await engine.initialize()
+
+        # 봇 시작 알림
+        from src.utils.telegram import send_alert
+        await send_alert(
+            f"[US] 봇 시작\n"
+            f"자산: ${engine.portfolio.total_equity:.2f}\n"
+            f"현금: ${engine.portfolio.cash:.2f}\n"
+            f"포지션: {len(engine.portfolio.positions)}개\n"
+            f"전략: {len(engine.strategies)}개",
+        )
+
         await asyncio.gather(
             engine.run(),
             api_server.run(),
@@ -59,6 +70,13 @@ async def main(config_path: str, log_level: str):
         from loguru import logger
         logger.exception(f"라이브 엔진 치명적 오류: {e}")
     finally:
+        # 봇 종료 알림
+        try:
+            from src.utils.telegram import send_alert as _send_alert
+            await _send_alert("[US] 봇 종료")
+        except Exception:
+            pass
+
         await engine.shutdown()
         await api_server.stop()
         remove_pid()

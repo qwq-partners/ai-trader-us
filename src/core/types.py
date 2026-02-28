@@ -359,11 +359,11 @@ class RiskMetrics:
 class RiskConfig:
     """Risk management configuration"""
     daily_max_loss_pct: float = 3.0
-    max_positions: int = 10
-    base_position_pct: float = 10.0
-    max_position_pct: float = 15.0
+    max_positions: int = 4
+    base_position_pct: float = 25.0
+    max_position_pct: float = 35.0
     min_cash_reserve_pct: float = 10.0
-    min_position_value: float = 1000.0      # $1,000
+    min_position_value: float = 50.0        # $50 (소자본)
     max_positions_per_sector: int = 3
 
     default_stop_loss_pct: float = 3.0

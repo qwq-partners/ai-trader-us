@@ -1,12 +1,12 @@
 # AI Trader US - Default Configuration
 
 trading:
-  initial_capital: 100000       # $100K
+  initial_capital: 700          # $700 (100만원 환전)
   market: US
 
   commission:
-    type: zero                  # zero (Alpaca), per_share (IB)
-    rate: 0.0
+    type: kis                   # KIS 해외주식 수수료
+    rate: 0.25                  # 0.25%
     min: 0.0
 
   slippage:
@@ -18,11 +18,11 @@ trading:
 
 risk:
   daily_max_loss_pct: 3.0       # -3% daily loss limit
-  max_positions: 10
-  base_position_pct: 10.0       # 10% per position
-  max_position_pct: 15.0        # 15% max per position
+  max_positions: 4              # $700 자본 → 최대 4 포지션
+  base_position_pct: 25.0       # 25% per position (~$175)
+  max_position_pct: 35.0        # 35% max per position
   min_cash_reserve_pct: 10.0    # Keep 10% cash
-  min_position_value: 1000      # Min $1,000 per trade
+  min_position_value: 50        # Min $50 per trade (소규모 자본)
   max_positions_per_sector: 3
 
   stop_loss_pct: 3.0
@@ -34,7 +34,7 @@ risk:
 
 strategies:
   orb:
-    enabled: true
+    enabled: false
     time_horizon: day
     or_period_minutes: 30       # 09:30-10:00 ET
     min_or_range_pct: 0.5
@@ -55,7 +55,7 @@ strategies:
     take_profit_pct: 15.0       # Let winners run (+20.8%, PF 1.94)
 
   vwap_bounce:
-    enabled: true
+    enabled: false
     time_horizon: day
     reclaim_confirm_bars: 3
     min_volume_ratio: 1.5
@@ -87,6 +87,7 @@ universe:
     - sp500
     - sp400
   min_price: 5.0
+  max_price: 200.0              # $700 자본 기준 1주 이상 매수 가능 상한
   min_avg_volume_usd: 5000000
   min_market_cap_mm: 300
 
@@ -114,9 +115,9 @@ exit_manager:
   eod_close: true               # Close day trades by 15:45 ET
 
 live:
-  broker: alpaca_paper             # alpaca_paper | kis
-  env: dev                         # prod / dev (모의)
-  screening_interval_min: 30       # 스크리닝 주기 (분) — 30분마다 1사이클
+  broker: kis                      # alpaca_paper | kis
+  env: prod                        # prod / dev (모의)
+  screening_interval_min: 15       # 스크리닝 주기 (분) — 15분마다 1사이클
   max_screen_symbols: 100          # 한 사이클 최대 스캔 종목 수 (유니버스 903 → 랜덤 순환)
   max_signals_per_cycle: 2         # 사이클당 최대 주문 수
   signal_cooldown_sec: 300        # 종목당 시그널 쿨다운 (초)
