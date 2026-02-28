@@ -16,6 +16,7 @@ KIS 해외주식 API 기반 라이브 트레이딩 엔진.
 from __future__ import annotations
 
 import asyncio
+import random
 import signal
 import uuid
 from datetime import datetime, date, timedelta
@@ -237,9 +238,10 @@ class LiveEngine:
         for s in expired:
             del self._signal_cooldown[s]
 
-        # 보유 종목 제외, 신규 매수 대상만 스캔
+        # 보유 종목 제외, 신규 매수 대상만 스캔 (매 사이클 랜덤 셔플 — 전 종목 순환 커버)
         held = set(self.portfolio.positions.keys())
         candidates = [s for s in self._universe if s not in held]
+        random.shuffle(candidates)
         candidates = candidates[:self._max_screen_symbols]
 
         signals: List[Signal] = []

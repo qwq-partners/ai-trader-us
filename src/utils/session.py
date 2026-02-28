@@ -73,7 +73,19 @@ class USSession:
         return max(0.0, diff)
 
     def is_trading_day(self, d: Optional[date] = None) -> bool:
-        """Is today a trading day?"""
+        """Is today a trading day? (NYSE 기준)"""
         if d is None:
             d = self.now_et().date()
         return self._calendar.is_trading_day(d)
+
+    def next_trading_day(self, d: Optional[date] = None) -> date:
+        """Next NYSE trading day"""
+        if d is None:
+            d = self.now_et().date()
+        return self._calendar.next_trading_day(d)
+
+    def prev_trading_day(self, d: Optional[date] = None) -> date:
+        """Previous NYSE trading day"""
+        if d is None:
+            d = self.now_et().date()
+        return self._calendar.prev_trading_day(d)
