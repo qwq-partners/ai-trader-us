@@ -23,6 +23,7 @@ load_dotenv(project_root / ".env")
 from src.utils.logger import setup_logger
 from src.core.config import AppConfig
 from src.core.live_engine import LiveEngine
+from src.api.server import APIServer
 
 
 PID_FILE = Path("/tmp/ai_trader_us_live.pid")
@@ -43,11 +44,15 @@ async def main(config_path: str, log_level: str):
 
     config = AppConfig.load(config_path)
     engine = LiveEngine(config)
+    api_server = APIServer(engine, port=8081)
 
     try:
         write_pid()
         await engine.initialize()
-        await engine.run()
+        await asyncio.gather(
+            engine.run(),
+            api_server.run(),
+        )
     except KeyboardInterrupt:
         pass
     except Exception as e:
@@ -55,6 +60,7 @@ async def main(config_path: str, log_level: str):
         logger.exception(f"라이브 엔진 치명적 오류: {e}")
     finally:
         await engine.shutdown()
+        await api_server.stop()
         remove_pid()
 
 

@@ -19,6 +19,7 @@ import asyncio
 import random
 import signal
 import uuid
+from collections import deque
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
@@ -91,6 +92,7 @@ class LiveEngine:
         self._universe: List[str] = []
         self._tasks: List[asyncio.Task] = []
         self._running = False
+        self.recent_signals: deque = deque(maxlen=50)
 
         # 설정값
         self._screening_interval = self._live_cfg.get("screening_interval_min", 30) * 60
@@ -355,6 +357,15 @@ class LiveEngine:
                 "strategy": signal.strategy.value,
                 "status": "submitted",
                 "message": signal.reason,
+            })
+
+            self.recent_signals.append({
+                "symbol": signal.symbol,
+                "strategy": signal.strategy.value if hasattr(signal.strategy, "value") else str(signal.strategy),
+                "score": float(signal.score) if signal.score else 0.0,
+                "side": signal.side.value if hasattr(signal.side, "value") else str(signal.side),
+                "timestamp": datetime.now().isoformat(),
+                "reason": signal.reason or "",
             })
 
             logger.info(

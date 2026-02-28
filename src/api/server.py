@@ -1,0 +1,155 @@
+"""
+AI Trader US - HTTP API Server
+
+aiohttp 기반 API 서버.
+LiveEngine 상태를 JSON으로 노출하여 대시보드에서 조회할 수 있게 함.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from aiohttp import web
+from loguru import logger
+
+if TYPE_CHECKING:
+    from ..core.live_engine import LiveEngine
+
+VERSION = "1.0.0"
+
+
+@web.middleware
+async def cors_middleware(request: web.Request, handler):
+    """CORS 헤더 추가 미들웨어"""
+    if request.method == "OPTIONS":
+        response = web.Response(status=204)
+    else:
+        response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+class APIServer:
+    """LiveEngine 상태를 노출하는 HTTP API 서버"""
+
+    def __init__(self, engine: LiveEngine, port: int = 8081):
+        self.engine = engine
+        self.port = port
+        self._runner: web.AppRunner | None = None
+
+    def _build_app(self) -> web.Application:
+        app = web.Application(middlewares=[cors_middleware])
+        app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/api/us/status", self._handle_status)
+        app.router.add_get("/api/us/portfolio", self._handle_portfolio)
+        app.router.add_get("/api/us/positions", self._handle_positions)
+        app.router.add_get("/api/us/signals", self._handle_signals)
+        app.router.add_get("/api/us/orders", self._handle_orders)
+        return app
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def run(self):
+        """API 서버 시작 (asyncio.gather에서 사용)"""
+        app = self._build_app()
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "0.0.0.0", self.port)
+        await site.start()
+        logger.info(f"API 서버 시작 — http://0.0.0.0:{self.port}")
+
+        # engine이 살아있는 동안 대기
+        try:
+            while getattr(self.engine, "_running", False):
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
+    async def stop(self):
+        """API 서버 종료"""
+        if self._runner:
+            await self._runner.cleanup()
+            self._runner = None
+            logger.info("API 서버 종료")
+
+    # ------------------------------------------------------------------
+    # Handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    async def _handle_status(self, request: web.Request) -> web.Response:
+        engine = self.engine
+        session = getattr(engine, "session", None)
+        session_value = "closed"
+        if session:
+            try:
+                session_value = session.get_session().value
+            except Exception:
+                pass
+
+        return web.json_response({
+            "running": getattr(engine, "_running", False),
+            "session": session_value,
+            "timestamp": datetime.now().isoformat(),
+            "version": VERSION,
+        })
+
+    async def _handle_portfolio(self, request: web.Request) -> web.Response:
+        portfolio = self.engine.portfolio
+        total_value = float(portfolio.total_equity)
+        positions_value = float(portfolio.total_position_value)
+        daily_pnl = float(portfolio.effective_daily_pnl)
+        initial = float(portfolio.initial_capital)
+        daily_pnl_pct = (daily_pnl / initial * 100) if initial else 0.0
+
+        return web.json_response({
+            "cash": float(portfolio.cash),
+            "total_value": total_value,
+            "positions_value": positions_value,
+            "daily_pnl": daily_pnl,
+            "daily_pnl_pct": round(daily_pnl_pct, 2),
+            "positions_count": len(portfolio.positions),
+        })
+
+    async def _handle_positions(self, request: web.Request) -> web.Response:
+        positions = []
+        for symbol, pos in self.engine.portfolio.positions.items():
+            positions.append({
+                "symbol": symbol,
+                "name": getattr(pos, "name", ""),
+                "quantity": pos.quantity,
+                "avg_price": float(pos.avg_price),
+                "current_price": float(pos.current_price),
+                "pnl": float(pos.unrealized_pnl),
+                "pnl_pct": round(pos.unrealized_pnl_pct, 2),
+                "strategy": pos.strategy or "",
+                "stage": getattr(pos, "stage", ""),
+                "market_value": float(pos.market_value),
+            })
+        return web.json_response(positions)
+
+    async def _handle_signals(self, request: web.Request) -> web.Response:
+        signals = list(getattr(self.engine, "recent_signals", []))
+        return web.json_response(signals)
+
+    async def _handle_orders(self, request: web.Request) -> web.Response:
+        orders = []
+        for order_no, info in dict(getattr(self.engine, "_pending_orders", {})).items():
+            orders.append({
+                "order_no": order_no,
+                "symbol": info.get("symbol", ""),
+                "side": info.get("side", ""),
+                "quantity": info.get("qty", 0),
+                "price": float(info.get("price", 0)),
+                "status": "pending",
+                "timestamp": info.get("submitted_at", datetime.now()).isoformat(),
+            })
+        return web.json_response(orders)

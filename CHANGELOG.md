@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-02-28 — HTTP API 서버 추가 (Phase 1)
+
+**API 서버 (포트 8081):**
+- `src/api/server.py`: aiohttp 기반 HTTP API 서버 신규 추가
+  - `GET /health` — 헬스체크
+  - `GET /api/us/status` — 엔진 상태 (running, session, version)
+  - `GET /api/us/portfolio` — 포트폴리오 요약 (cash, total_value, daily_pnl)
+  - `GET /api/us/positions` — 보유 포지션 목록 (Decimal→float 변환)
+  - `GET /api/us/signals` — 최근 50건 시그널 (in-memory deque)
+  - `GET /api/us/orders` — 미체결 주문 목록
+  - CORS 미들웨어 (`Access-Control-Allow-Origin: *`)
+- `src/core/live_engine.py`: `recent_signals: deque(maxlen=50)` 추가, `_process_signal()` 성공 시 시그널 기록
+- `scripts/run_live.py`: APIServer를 `asyncio.gather`로 LiveEngine과 병렬 실행
+
 ## 2026-02-28 — US 장 독립 운영 + 코드리뷰 + 서비스 등록 + 버그 수정
 
 **US 장 독립 운영 정합성 (commit `f84c18d`):**
