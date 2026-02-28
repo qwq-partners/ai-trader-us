@@ -1,6 +1,12 @@
 # Changelog
 
-## 2026-02-28 — 코드리뷰 + 서비스 등록 + 버그 수정
+## 2026-02-28 — US 장 독립 운영 + 코드리뷰 + 서비스 등록 + 버그 수정
+
+**US 장 독립 운영 정합성 (commit `f84c18d`):**
+- config: screening_interval_min 5→30분, max_screen_symbols 20→100 (운영값)
+- live_engine: 유니버스 랜덤 셔플 추가 (매 사이클, 전 903종목 순환 커버)
+- session.py: next_trading_day(), prev_trading_day() 위임 메서드 추가
+- 검증: NYSE 캘린더(XNYS) 기반 — 3/2(한국 대체공휴일)도 US 거래일 ✅
 
 **버그 수정 (commit `3884055`):**
 - P1: 빈 `order_no` 충돌 — KIS ODNO="" 시 `local-{uuid}` 폴백 키 사용 (매수/매도)
