@@ -551,6 +551,32 @@ class LiveEngine:
                     )
                     qty = adjusted
 
+        # ── Finviz 장중 모멘텀 최종 확인 (매수 직전 게이트) ─────────────
+        # 주가가 지금 이 시간에 내리고 있으면 진입 보류
+        # (기술/Finviz 모두 통과해도 1시간 하락 중이면 스킵)
+        if self.finviz_provider.is_ready:
+            try:
+                intraday = await self.finviz_provider.get_intraday_scan([symbol])
+                d = intraday.get(symbol, {})
+                perf_1h  = d.get("perf_1h", 0.0)
+                perf_30m = d.get("perf_30m", 0.0)
+                ms       = d.get("momentum_score", 50.0)
+                # 하락 지속 중: 1시간 -2%이상 + 30분도 -1% 이상
+                if perf_1h <= -2.0 and perf_30m <= -1.0:
+                    logger.info(
+                        f"[장중확인] {symbol} 하락 지속 → 진입 보류 "
+                        f"(1h={perf_1h:+.2f}%, 30m={perf_30m:+.2f}%, ms={ms:.0f})"
+                    )
+                    return False
+                if ms < 40:
+                    logger.info(
+                        f"[장중확인] {symbol} 장중 모멘텀 약세 → 진입 보류 "
+                        f"(ms={ms:.0f}, 1h={perf_1h:+.2f}%)"
+                    )
+                    return False
+            except Exception as _ie:
+                logger.debug(f"[장중확인] {symbol} Finviz 조회 실패 → 스킵: {_ie}")
+
         # 매수 주문 제출 (지정가: 현재가 + 0.2% 허용)
         limit_price = float(
             (Decimal(str(price)) * Decimal("1.002")).quantize(Decimal("0.01"))
