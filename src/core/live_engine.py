@@ -461,6 +461,35 @@ class LiveEngine:
 
                     signal = strategy.evaluate(symbol, history, self.portfolio)
                     if signal:
+                        # ── Finviz 전략별 시그널 보정 ────────────────────
+                        if self.finviz_provider.is_ready:
+                            fz = self.finviz_provider.get_strategy_signals(
+                                symbol, strategy.name
+                            )
+                            # 필터 실패 시 시그널 폐기
+                            if not fz["pass"]:
+                                logger.info(
+                                    f"[Finviz 필터] {symbol} {strategy.name} 제외 "
+                                    f"— {'; '.join(fz.get('warnings', []))}"
+                                )
+                                signal = None
+                            else:
+                                # 점수 조정 적용
+                                adj = fz["score_adjustment"]
+                                if adj != 0:
+                                    old_score = signal.score
+                                    signal.score = max(0.0, signal.score + adj)
+                                    logger.debug(
+                                        f"[Finviz] {symbol} 점수 {old_score:.1f} "
+                                        f"→ {signal.score:.1f} ({adj:+.1f}pt)"
+                                    )
+                                # reason에 주요 근거 추가
+                                if fz["reasons"]:
+                                    signal.reason = (
+                                        signal.reason + " | " +
+                                        ", ".join(fz["reasons"][:2])
+                                    )
+                    if signal:
                         signals.append(signal)
                         break  # 한 종목당 하나의 시그널
 
@@ -508,6 +537,19 @@ class LiveEngine:
         if qty <= 0:
             logger.info(f"[시그널] {symbol} — 사이징 0주 (자금 부족)")
             return False
+
+        # ── Finviz Beta 기반 포지션 리스크 보정 ──────────────────────────
+        # 고변동성 종목(Beta > 1.5)은 포지션 비율 자동 축소
+        if self.finviz_provider.is_ready and qty > 1:
+            multiplier, risk_reason = self.finviz_provider.get_risk_multiplier(symbol)
+            if multiplier < 1.0:
+                adjusted = max(1, int(qty * multiplier))
+                if adjusted < qty:
+                    logger.info(
+                        f"[Finviz 리스크] {symbol} {qty}→{adjusted}주 "
+                        f"({risk_reason})"
+                    )
+                    qty = adjusted
 
         # 매수 주문 제출 (지정가: 현재가 + 0.2% 허용)
         limit_price = float(
