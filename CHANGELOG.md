@@ -1,5 +1,27 @@
 # Changelog
 
+## [2026-03-01] _watchlist_loop — 상위 25 + 보유 포지션 Finviz 실시간 모니터링 — commit `d62aeab`
+
+### 배경
+- `_screener_loop(60분)` / `_screening_loop(15분)` 갭이 너무 커서 강한 모멘텀 기회를 놓침
+- 보유 포지션의 장중 모멘텀 급락을 즉시 감지하지 못함
+
+### 구현
+- 새 태스크: `_watchlist_loop(5분 주기)`, 총 태스크 9개 → **10개**
+  - 대상: StockScreener 상위 25 + 보유 포지션 (배치 호출)
+  - Finviz `get_intraday_scan()` TTL=5분 캐시 재사용
+- **보유 포지션 모니터링**: `ms < 25 AND perf_1h ≤ -2.5%` → `_check_exits()` 즉시
+- **상위 후보 즉시 평가**: `ms ≥ 75 AND perf_1h ≥ 0.5%` → `_evaluate_watchlist_candidate()`
+  - 기존 스크리닝과 동일 파이프라인: `_get_history → compute_indicators → strategy.evaluate → Finviz 필터 → _process_signal()`
+  - 워치리스트 쿨다운 15분 (스크리닝 쿨다운과 독립)
+
+### 설계 원칙
+- Finviz 게이트(매수 차단) ↔ 워치리스트(매수 가속) 상호 보완
+- Fall-through 안전: 오류 시 해당 종목 스킵, 루프 계속
+- [Finviz 장중 최종 게이트] commit `3921277`: `_process_signal()` 매수 직전 heuristic check
+
+---
+
 ## 2026-03-01 — Finviz Elite API 전면 통합 v2 — commits `9e598ea`, `701e1f3`, `e895d0a`
 
 ### FinvizProvider v2 (`src/data/providers/finviz_provider.py`)
