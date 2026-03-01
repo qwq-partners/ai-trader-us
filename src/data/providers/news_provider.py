@@ -5,6 +5,7 @@ Abstract interface and implementations for news sentiment data.
 Supports Finnhub (primary) and Polygon.io (secondary).
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
@@ -222,6 +223,14 @@ class FinnhubNewsProvider(NewsProvider):
         self._sentiment_cache[symbol] = (now, score)
         return score
 
+    async def get_news_async(self, symbol: str, days: int = 3) -> List[NewsArticle]:
+        """get_news의 비동기 래퍼"""
+        return await asyncio.to_thread(self.get_news, symbol, days)
+
+    async def get_sentiment_async(self, symbol: str) -> Optional[SentimentScore]:
+        """get_sentiment의 비동기 래퍼"""
+        return await asyncio.to_thread(self.get_sentiment, symbol)
+
     def get_bulk_sentiment(self, symbols: List[str]) -> Dict[str, SentimentScore]:
         """Get sentiment for multiple symbols"""
         results = {}
@@ -370,3 +379,11 @@ class CompositeNewsProvider(NewsProvider):
             except Exception:
                 continue
         return None
+
+    async def get_news_async(self, symbol: str, days: int = 3) -> List[NewsArticle]:
+        """get_news의 비동기 래퍼"""
+        return await asyncio.to_thread(self.get_news, symbol, days)
+
+    async def get_sentiment_async(self, symbol: str) -> Optional[SentimentScore]:
+        """get_sentiment의 비동기 래퍼"""
+        return await asyncio.to_thread(self.get_sentiment, symbol)

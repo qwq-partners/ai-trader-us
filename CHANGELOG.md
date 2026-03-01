@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-03-01 — US 테마 탐지 + 스크리닝 통합
+
+**신규 파일**:
+- `src/data/providers/us_theme_detector.py` — US 테마 탐지기 (Finnhub 뉴스 키워드 매칭, 11개 테마, 30분 주기)
+
+**수정 파일**:
+- `src/data/providers/news_provider.py` — FinnhubNewsProvider, CompositeNewsProvider에 async 래퍼 추가 (`get_news_async`, `get_sentiment_async`)
+- `src/core/live_engine.py` — 테마 탐지/스크리너 루프 2개 추가 (태스크 7,8), SentimentScorer 전략 주입, restart_map 갱신
+- `src/api/server.py` — `/api/us/themes`, `/api/us/screening` 엔드포인트 추가
+
+### 상세
+- `USThemeDetector`: Finnhub general_news(30건) + 대형주 5개 company_news(각 5건) 수집 → 11개 테마 키워드 매칭
+- 활성 테마 조건: news_count >= 2, score = min(100, count * 15 + 20)
+- 스크리너: 기존 `StockScreener.scan()` 60분 주기 장중 실행 (유니버스 300개)
+- 센티멘트: `SentimentScorer`를 전략에 `_sentiment_scorer` 속성으로 주입
+- KR 대시보드 프록시 경유 확인 완료 (`/api/us-proxy/api/us/themes`)
+
 ## 2026-02-28 — 2차 코드리뷰 수정 (5건)
 
 - `live_engine.py`: 전량 매도 체결 시 `positions.pop()` 누락 → 반복 매도 방지

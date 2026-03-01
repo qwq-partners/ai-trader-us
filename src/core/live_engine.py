@@ -34,7 +34,11 @@ from .types import (
     StrategyType, TimeHorizon, PositionSide,
 )
 from ..data.feeds.finnhub_ws import FinnhubWSFeed
+from ..data.providers.news_provider import FinnhubNewsProvider, CompositeNewsProvider
+from ..data.providers.sentiment_scorer import SentimentScorer
+from ..data.providers.us_theme_detector import USThemeDetector
 from ..data.providers.yfinance_provider import YFinanceProvider
+from ..data.screener import StockScreener
 from ..data.store import DataStore
 from ..data.universe import UniverseManager
 from ..execution.broker.kis_us_broker import EXCHANGE_MAP
@@ -92,6 +96,25 @@ class LiveEngine:
         # Finnhub WebSocket 실시간 시세
         finnhub_key = os.getenv("FINNHUB_API_KEY", "")
         self.ws_feed: Optional[FinnhubWSFeed] = FinnhubWSFeed(finnhub_key) if finnhub_key else None
+
+        # 테마 탐지기
+        self.theme_detector: Optional[USThemeDetector] = (
+            USThemeDetector(finnhub_key) if finnhub_key else None
+        )
+
+        # 스크리너 결과 캐시
+        self.screener = StockScreener(provider=self.data_provider)
+        self._last_screen_result = None
+        self._last_screen_time: Optional[datetime] = None
+
+        # 센티멘트 스코어러
+        self.news_provider = None
+        self.sentiment_scorer: Optional[SentimentScorer] = None
+        if finnhub_key:
+            fp = FinnhubNewsProvider(finnhub_key)
+            if fp._client:
+                self.news_provider = CompositeNewsProvider([fp])
+                self.sentiment_scorer = SentimentScorer(self.news_provider)
 
         # 상태
         self._pending_orders: Dict[str, dict] = {}  # order_no -> order_info
@@ -178,6 +201,9 @@ class LiveEngine:
             cfg = strategies_cfg.get(name, {})
             if cfg.get("enabled", True):
                 strategy = cls(config=cfg)
+                # 센티멘트 스코어러 주입
+                if self.sentiment_scorer:
+                    strategy._sentiment_scorer = self.sentiment_scorer
                 self.strategies.append(strategy)
 
     async def run(self):
@@ -199,6 +225,17 @@ class LiveEngine:
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
         ]
 
+        # 테마 탐지 태스크
+        if self.theme_detector:
+            self._tasks.append(
+                asyncio.create_task(self._theme_detection_loop(), name="theme_detect")
+            )
+
+        # 스크리너 태스크
+        self._tasks.append(
+            asyncio.create_task(self._screener_loop(), name="screener")
+        )
+
         # Finnhub WS 태스크
         if self.ws_feed:
             self._tasks.append(
@@ -215,6 +252,8 @@ class LiveEngine:
             "order_check": self._order_check_loop,
             "eod_close": self._eod_close_loop,
             "heartbeat": self._heartbeat_loop,
+            "theme_detect": self._theme_detection_loop,
+            "screener": self._screener_loop,
         }
         try:
             while self._running:
@@ -1018,6 +1057,60 @@ class LiveEngine:
                 logger.error(f"[Heartbeat] 오류: {e}")
 
             await asyncio.sleep(self._heartbeat_sec)
+
+    # ============================================================
+    # 태스크 7: 테마 탐지 루프
+    # ============================================================
+
+    async def _theme_detection_loop(self):
+        """US 테마 탐지 (30분 주기)"""
+        await asyncio.sleep(10)  # 초기 대기
+
+        while self._running:
+            try:
+                if self.theme_detector:
+                    themes = await self.theme_detector.detect_themes()
+                    if themes:
+                        logger.info(
+                            f"[테마] 활성 테마 {len(themes)}개: "
+                            f"{', '.join(t.name for t in themes[:5])}"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[테마] 탐지 오류: {e}")
+
+            await asyncio.sleep(1800)  # 30분
+
+    # ============================================================
+    # 태스크 8: 스크리너 루프
+    # ============================================================
+
+    async def _screener_loop(self):
+        """유니버스 스크리닝 (60분 주기, 장중만)"""
+        await asyncio.sleep(30)  # 초기 대기
+
+        while self._running:
+            try:
+                if self.session.is_market_open():
+                    symbols = self._universe[:300]
+                    if symbols:
+                        result = await asyncio.to_thread(
+                            self.screener.scan, symbols,
+                        )
+                        self._last_screen_result = result
+                        self._last_screen_time = datetime.now()
+                        logger.info(
+                            f"[스크리너] 완료 — {len(result.results)}/{result.total_scanned} 통과"
+                        )
+                else:
+                    logger.debug("[스크리너] 장 마감 — skip")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[스크리너] 오류: {e}")
+
+            await asyncio.sleep(3600)  # 60분
 
     # ============================================================
     # Finnhub WS 콜백

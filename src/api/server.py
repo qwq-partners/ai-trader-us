@@ -52,6 +52,8 @@ class APIServer:
         app.router.add_get("/api/us/signals", self._handle_signals)
         app.router.add_get("/api/us/orders", self._handle_orders)
         app.router.add_get("/api/us/trades", self._handle_trades)
+        app.router.add_get("/api/us/themes", self._handle_themes)
+        app.router.add_get("/api/us/screening", self._handle_screening)
         return app
 
     # ------------------------------------------------------------------
@@ -192,3 +194,37 @@ class APIServer:
                         "market": "US",
                     })
         return web.json_response(list(reversed(trades[-200:])))
+
+    async def _handle_themes(self, request: web.Request) -> web.Response:
+        """US 테마 목록 반환"""
+        detector = getattr(self.engine, "theme_detector", None)
+        if not detector:
+            return web.json_response([])
+        return web.json_response(detector.to_dict_list())
+
+    async def _handle_screening(self, request: web.Request) -> web.Response:
+        """스크리너 결과 반환 (상위 50개)"""
+        result = getattr(self.engine, "_last_screen_result", None)
+        if not result:
+            return web.json_response([])
+
+        def _safe_round(val, digits=2):
+            return round(val, digits) if val is not None else 0
+
+        items = []
+        for r in result.results[:50]:
+            items.append({
+                "symbol": r.symbol,
+                "price": r.close if r.close is not None else 0,
+                "change_pct": _safe_round(r.change_1d),
+                "change_5d": _safe_round(r.change_5d),
+                "volume": r.volume if r.volume is not None else 0,
+                "avg_volume": r.avg_volume if r.avg_volume is not None else 0,
+                "vol_ratio": _safe_round(r.vol_ratio),
+                "rsi": _safe_round(r.rsi, 1),
+                "pct_from_52w_high": _safe_round(r.pct_from_52w_high, 1),
+                "atr_pct": _safe_round(r.atr_pct),
+                "score": _safe_round(r.score, 1),
+                "flags": r.flags if r.flags is not None else [],
+            })
+        return web.json_response(items)
