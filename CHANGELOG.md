@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026-03-01] 포트폴리오 동기화 버그 수정 — commit `9e89d58`
+
+### Bug 1: avg_price KRW 오계산 (kis_us_broker.py)
+- **원인**: `WCRC_FRCR_DVSN_CD=02`(원화 모드) → `PCH_AMT`가 KRW 총매입금액으로 반환됨
+  - 예: NVDA 1주 $180 구매 → `PCH_AMT` ≈ 252,000(원) → avg_price=252,000로 오입력
+- **수정**: `EVLU_PFLS_RT1`(손익률%) + `OVRS_NOW_PRIC1`(현재가 USD)로 역산
+  - `avg_price = current_price / (1 + pnl_pct/100)` — 통화 설정 무관, 항상 USD 주당가
+  - `get_positions()` + `get_balance()` 양쪽 모두 수정
+
+### Bug 2: highest_price 재시작 시 trailing stop 고점 리셋
+- **원인**: 재시작 후 `highest_price = current_price`로 초기화 → 기존 고점 유실
+- **수정**: `~/.cache/ai_trader_us/highest_prices.json` 영속화
+  - `_save_highest_prices()`: `_sync_portfolio()` 매 30초 호출 시 자동 저장
+  - `_load_highest_prices()`: 재시작 시 로드 → `max(cached, current_price)` 복원
+  - 포지션 청산 시 다음 save 사이클에서 자동 제거
+
+---
+
 ## [2026-03-01] _watchlist_loop — 상위 25 + 보유 포지션 Finviz 실시간 모니터링 — commit `d62aeab`
 
 ### 배경
