@@ -25,9 +25,9 @@ risk:
   min_position_value: 50        # Min $50 per trade (소규모 자본)
   max_positions_per_sector: 3
 
-  stop_loss_pct: 3.0
+  stop_loss_pct: 4.0           # 3→4% (US 일중 노이즈 2~3% 감안)
   take_profit_pct: 6.0
-  trailing_stop_pct: 2.0
+  trailing_stop_pct: 3.0       # 2→3% (일중 ATR 대비 적정 간격)
 
   consecutive_loss_threshold: 3
   consecutive_loss_size_factor: 0.5
@@ -49,7 +49,7 @@ strategies:
     time_horizon: swing
     breakout_period: 20         # 20-day high breakout
     min_breakout_pct: 0.3       # Grid Search optimal (1280 combos)
-    volume_surge_ratio: 1.2     # 1.2x — low bar captures more breakouts
+    volume_surge_ratio: 1.8     # 1.2→1.8x (기관 주도 진짜 돌파 기준)
     min_score: 50               # Wider funnel, score handles quality
     stop_loss_pct: 5.0          # Generous stop avoids noise exits
     take_profit_pct: 15.0       # Let winners run (+20.8%, PF 1.94)
@@ -103,8 +103,8 @@ exit_manager:
   third_exit_pct: 10.0
   third_exit_ratio: 0.50
 
-  stop_loss_pct: 3.0
-  trailing_stop_pct: 2.0
+  stop_loss_pct: 4.0           # 3→4% (risk 섹션과 통일)
+  trailing_stop_pct: 3.0       # 2→3% (US ATR 기준)
   trailing_activate_pct: 3.0
 
   enable_dynamic_stop: true

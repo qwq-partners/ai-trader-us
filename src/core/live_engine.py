@@ -34,6 +34,7 @@ from .types import (
     StrategyType, TimeHorizon, PositionSide,
 )
 from ..data.feeds.finnhub_ws import FinnhubWSFeed
+from ..data.providers.earnings_provider import EarningsProvider
 from ..data.providers.news_provider import FinnhubNewsProvider, CompositeNewsProvider
 from ..data.providers.sentiment_scorer import SentimentScorer
 from ..data.providers.us_theme_detector import USThemeDetector
@@ -101,6 +102,11 @@ class LiveEngine:
         self.theme_detector: Optional[USThemeDetector] = (
             USThemeDetector(finnhub_key) if finnhub_key else None
         )
+
+        # P1-B: 어닝 캘린더 프로바이더
+        self.earnings_provider = EarningsProvider(finnhub_key)
+        self._earnings_today: Set[str] = set()          # 오늘/어제 어닝 발표 종목
+        self._earnings_last_refresh: Optional[date] = None  # 마지막 갱신일
 
         # 스크리너 결과 캐시
         self.screener = StockScreener(provider=self.data_provider)
@@ -316,6 +322,14 @@ class LiveEngine:
                     self.portfolio.reset_daily()
                     logger.info("[엔진] 일일 통계 리셋")
 
+                # P1-B: 어닝 캘린더 갱신 (1일 1회)
+                if self._earnings_last_refresh != today:
+                    try:
+                        self._earnings_today = await self.earnings_provider.get_today_earnings(today)
+                        self._earnings_last_refresh = today
+                    except Exception as e:
+                        logger.warning(f"[Earnings] 갱신 실패: {e}")
+
                 await self._run_screening()
 
             except asyncio.CancelledError:
@@ -343,11 +357,42 @@ class LiveEngine:
         for s in expired:
             del self._signal_cooldown[s]
 
-        # 보유 종목 제외, 신규 매수 대상만 스캔 (매 사이클 랜덤 셔플 — 전 종목 순환 커버)
+        # ── P1-A: StockScreener 결과 기반 후보 우선 사용 ──────────────────
         held = set(self.portfolio.positions.keys())
-        candidates = [s for s in self._universe if s not in held]
-        random.shuffle(candidates)
-        candidates = candidates[:self._max_screen_symbols]
+        screen_candidates: List[str] = []
+
+        if self._last_screen_result and self._last_screen_result.results:
+            # StockScreener 점수 순 상위 150개 (보유 종목 제외)
+            screen_candidates = [
+                r.symbol for r in self._last_screen_result.results
+                if r.symbol not in held
+            ][:150]
+            logger.debug(
+                f"[스크리닝] StockScreener 상위 {len(screen_candidates)}개 후보 사용"
+            )
+
+        if screen_candidates:
+            candidates = screen_candidates[:self._max_screen_symbols]
+        else:
+            # 폴백: 랜덤 셔플 (StockScreener 결과 없을 때)
+            logger.debug("[스크리닝] StockScreener 결과 없음 — 랜덤 샘플 폴백")
+            candidates = [s for s in self._universe if s not in held]
+            random.shuffle(candidates)
+            candidates = candidates[:self._max_screen_symbols]
+
+        # ── P3: 동적 max_price (가용 현금 × max_position_pct%) ─────────────
+        # KIS는 소수주 불가 → 주가 > max_position_value이면 1주도 못 삼
+        # 단, allow_min_one=True이면 max_position_pct 이하 종목은 예산 초과해도 허용
+        uni_max_price = float(
+            (self.config.raw.get("universe") or {}).get("max_price", 0)
+        )
+        dynamic_max_price = float(self.portfolio.cash) * (
+            self.risk_manager._config.max_position_pct / 100
+        )
+        # 두 상한 중 더 큰 값 사용 (동적 계산이 hard cap보다 작을 때 hard cap이 의미 없음)
+        effective_max_price = (
+            uni_max_price if uni_max_price > 0 else dynamic_max_price
+        )
 
         signals: List[Signal] = []
         processed = 0
@@ -370,12 +415,11 @@ class LiveEngine:
                 if history is None or len(history) < 50:
                     continue
 
-                # P1-8: 고가 종목 필터 (max_price 초과 시 스킵)
-                max_price = self.config.raw.get("universe", {}).get("max_price", 0)
-                if max_price > 0:
-                    last_close = float(history['close'].iloc[-1])
-                    if last_close > max_price:
-                        continue
+                last_close = float(history['close'].iloc[-1])
+
+                # P3: 동적 max_price 필터 — 1주도 살 수 없으면 스킵
+                if effective_max_price > 0 and last_close > effective_max_price:
+                    continue
 
                 # 인디케이터 사전 계산 → 캐시 (exit_check_loop에서 재사용)
                 try:
@@ -383,8 +427,17 @@ class LiveEngine:
                 except Exception:
                     pass
 
-                # 전략별 평가
+                # ── P1-B: 전략 선택 필터 ──────────────────────────────────
+                # EarningsDrift는 실제 어닝 발표 종목에만 적용
+                # 어닝 캘린더 비어있으면(API 미설정) 기존처럼 모든 종목에 적용
                 for strategy in self.strategies:
+                    if (
+                        strategy.name == "earnings_drift"
+                        and self._earnings_today         # 캘린더 데이터 있을 때만 필터
+                        and symbol not in self._earnings_today
+                    ):
+                        continue  # 어닝 비발표 종목 → EarningsDrift 스킵
+
                     signal = strategy.evaluate(symbol, history, self.portfolio)
                     if signal:
                         signals.append(signal)
@@ -405,7 +458,8 @@ class LiveEngine:
 
         logger.info(
             f"[스크리닝] 완료 — 스캔: {processed}, 시그널: {len(signals)}, "
-            f"주문: {submitted}"
+            f"주문: {submitted} | "
+            f"earnings 대상: {len(self._earnings_today)}개"
         )
 
     async def _process_signal(self, signal: Signal) -> bool:
@@ -425,9 +479,10 @@ class LiveEngine:
             logger.warning(f"[시그널] {symbol} — 현재가 조회 실패")
             return False
 
-        # 포지션 사이징
+        # 포지션 사이징 (P3: allow_min_one=True — 금액 기준 최소 1주 보장)
+        # KIS는 소수주 불가 → floor(목표금액/주가) 계산 후 0이면 1주 강제 시도
         qty = self.risk_manager.calculate_position_size(
-            self.portfolio, Decimal(str(price))
+            self.portfolio, Decimal(str(price)), allow_min_one=True
         )
         if qty <= 0:
             logger.info(f"[시그널] {symbol} — 사이징 0주 (자금 부족)")

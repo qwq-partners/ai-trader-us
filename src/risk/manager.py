@@ -51,8 +51,18 @@ class RiskManager:
         return True
 
     def calculate_position_size(self, portfolio: Portfolio,
-                                price: Decimal) -> int:
-        """Calculate position size in shares"""
+                                price: Decimal,
+                                allow_min_one: bool = False) -> int:
+        """
+        Calculate position size in shares.
+
+        Args:
+            portfolio: 현재 포트폴리오
+            price: 주가
+            allow_min_one: True이면 예산 부족이어도 1주 강제 허용
+                           (단, 주가 ≤ max_position_value 이고 현금 ≥ 주가 조건)
+                           KIS는 소수주 불가이므로 금액 기준 주문의 최소 단위 보장용.
+        """
         if price <= 0:
             return 0
 
@@ -61,6 +71,11 @@ class RiskManager:
         available = portfolio.cash - min_cash
 
         if available < Decimal(str(self._config.min_position_value)):
+            # allow_min_one: 현금이 주가 이상이면 1주 허용
+            if allow_min_one and portfolio.cash >= price:
+                max_value = equity * Decimal(str(self._config.max_position_pct / 100))
+                if price <= max_value:
+                    return 1
             return 0
 
         # Base position value
@@ -76,6 +91,18 @@ class RiskManager:
                        f"(consecutive losses: {self._consecutive_losses})")
 
         quantity = int(position_value / price)
+
+        # 금액 기준 최소 1주 보장:
+        # 계산 결과 0주이지만 주가가 max_position_value 이하이고 현금이 충분하면 1주
+        if quantity == 0 and allow_min_one and portfolio.cash >= price:
+            max_val = equity * Decimal(str(self._config.max_position_pct / 100))
+            if price <= max_val:
+                quantity = 1
+                logger.info(
+                    f"[사이징] 금액 기준 1주 강제 (주가 ${float(price):.2f}, "
+                    f"예산 ${float(max_val):.2f})"
+                )
+
         return max(0, quantity)
 
     def record_trade_result(self, is_win: bool):
