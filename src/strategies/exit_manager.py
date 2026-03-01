@@ -134,3 +134,11 @@ class ExitManager:
     def on_position_closed(self, symbol: str):
         """Clean up when position is fully closed"""
         self._exit_stages.pop(symbol, None)
+
+    def get_stages(self) -> Dict[str, int]:
+        """영속화용 스테이지 상태 반환"""
+        return dict(self._exit_stages)
+
+    def restore_stages(self, stages: Dict[str, int]):
+        """재시작 시 스테이지 복원"""
+        self._exit_stages.update(stages)

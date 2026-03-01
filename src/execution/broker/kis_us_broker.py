@@ -445,7 +445,7 @@ class KISUSBroker:
     async def get_order_history(self, start_date: str = None,
                                 end_date: str = None) -> List[dict]:
         """
-        체결 내역 조회.
+        체결 내역 조회 (페이지네이션 지원).
 
         Args:
             start_date: YYYYMMDD (기본: 오늘)
@@ -461,60 +461,81 @@ class KISUSBroker:
             end_date = today
 
         url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-daily-ccld"
-        params = {
-            "CANO": self.config.account_no,
-            "ACNT_PRDT_CD": self.config.account_product_cd,
-            "PDNO": "",
-            "ORD_STRT_DT": start_date,
-            "ORD_END_DT": end_date,
-            "SLL_BUY_DVSN": "00",   # 00=전체
-            "CCLD_NCCS_DVSN": "00",  # 00=전체
-            "OVRS_EXCG_CD": "",       # 빈값=전체 거래소
-            "SORT_SQN": "DS",       # 내림차순
-            "ORD_DT": "",
-            "ORD_GNO_BRNO": "",
-            "ODNO": "",
-            "CTX_AREA_NK200": "",
-            "CTX_AREA_FK200": "",
-        }
-
-        data = await self._api_get(url, self._tr_ccld, params)
-        if data.get("rt_cd") != "0":
-            logger.error(f"체결 내역 조회 실패: {data.get('msg1', '')}")
-            return []
-
+        ctx_fk = ""
+        ctx_nk = ""
         orders = []
-        for item in data.get("output1", []):
-            order_no = item.get("ODNO", "").strip()
-            if not order_no:
-                continue
+        max_pages = 10  # 무한 루프 방지
 
-            filled_qty = int(item.get("FT_CCLD_QTY", "0") or "0")
-            ord_qty = int(item.get("FT_ORD_QTY", "0") or "0")
+        for page in range(max_pages):
+            params = {
+                "CANO": self.config.account_no,
+                "ACNT_PRDT_CD": self.config.account_product_cd,
+                "PDNO": "",
+                "ORD_STRT_DT": start_date,
+                "ORD_END_DT": end_date,
+                "SLL_BUY_DVSN": "00",   # 00=전체
+                "CCLD_NCCS_DVSN": "00",  # 00=전체
+                "OVRS_EXCG_CD": "",       # 빈값=전체 거래소
+                "SORT_SQN": "DS",       # 내림차순
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": ctx_nk,
+                "CTX_AREA_FK200": ctx_fk,
+            }
 
-            # 상태 판정
-            if filled_qty >= ord_qty and ord_qty > 0:
-                status = "filled"
-            elif filled_qty > 0:
-                status = "partial"
+            data = await self._api_get(url, self._tr_ccld, params, return_headers=True)
+            if data.get("rt_cd") != "0":
+                if page == 0:
+                    logger.error(f"체결 내역 조회 실패: {data.get('msg1', '')}")
+                break
+
+            for item in data.get("output1", []):
+                order_no = item.get("ODNO", "").strip()
+                if not order_no:
+                    continue
+
+                filled_qty = int(item.get("FT_CCLD_QTY", "0") or "0")
+                ord_qty = int(item.get("FT_ORD_QTY", "0") or "0")
+
+                # 상태 판정
+                if filled_qty >= ord_qty and ord_qty > 0:
+                    status = "filled"
+                elif filled_qty > 0:
+                    status = "partial"
+                else:
+                    status = "pending"
+
+                sll_buy = item.get("SLL_BUY_DVSN_CD", "")
+                side = "sell" if sll_buy == "01" else "buy"
+
+                orders.append({
+                    "order_no": order_no,
+                    "symbol": item.get("OVRS_PDNO", "").strip(),
+                    "side": side,
+                    "qty": ord_qty,
+                    "price": float(item.get("FT_ORD_UNPR3", "0") or "0"),
+                    "filled_qty": filled_qty,
+                    "filled_price": float(item.get("FT_CCLD_UNPR3", "0") or "0"),
+                    "status": status,
+                    "time": item.get("ORD_TMD", ""),
+                    "exchange": item.get("OVRS_EXCG_CD", ""),
+                })
+
+            # 연속조회 키 확인
+            tr_cont = data.get("_tr_cont", "")
+            new_fk = (data.get("ctx_area_fk200") or "").strip()
+            new_nk = (data.get("ctx_area_nk200") or "").strip()
+
+            # 다음 페이지 존재 여부: tr_cont가 "M" 또는 "F"이고 연속조회 키가 변경됨
+            if tr_cont in ("M", "F") and (new_fk or new_nk):
+                # IRP 중복 방지: 이전과 동일한 키면 중단
+                if new_fk == ctx_fk and new_nk == ctx_nk:
+                    break
+                ctx_fk = new_fk
+                ctx_nk = new_nk
             else:
-                status = "pending"
-
-            sll_buy = item.get("SLL_BUY_DVSN_CD", "")
-            side = "sell" if sll_buy == "01" else "buy"
-
-            orders.append({
-                "order_no": order_no,
-                "symbol": item.get("OVRS_PDNO", "").strip(),
-                "side": side,
-                "qty": ord_qty,
-                "price": float(item.get("FT_ORD_UNPR3", "0") or "0"),
-                "filled_qty": filled_qty,
-                "filled_price": float(item.get("FT_CCLD_UNPR3", "0") or "0"),
-                "status": status,
-                "time": item.get("ORD_TMD", ""),
-                "exchange": item.get("OVRS_EXCG_CD", ""),
-            })
+                break
 
         return orders
 
@@ -563,7 +584,8 @@ class KISUSBroker:
         logger.error("[토큰] 3회 재시도 후에도 토큰 발급 실패")
         return False
 
-    async def _api_get(self, url: str, tr_id: str, params: dict) -> dict:
+    async def _api_get(self, url: str, tr_id: str, params: dict,
+                       return_headers: bool = False) -> dict:
         if not self._session or self._session.closed:
             if not await self.connect():
                 return {"rt_cd": "-1", "msg1": "세션 연결 실패"}
@@ -588,10 +610,13 @@ class KISUSBroker:
                     try:
                         data = await resp.json()
                     except Exception:
-                        return {"rt_cd": "-1", "msg1": f"JSON 파싱 실패 (HTTP {resp.status})"}
+                        err = {"rt_cd": "-1", "msg1": f"JSON 파싱 실패 (HTTP {resp.status})"}
+                        return err
                     if self._is_token_error(data) and attempt < 2:
                         await self._ensure_token()
                         continue
+                    if return_headers:
+                        data["_tr_cont"] = resp.headers.get("tr_cont", "").strip()
                     return data
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt < 2:

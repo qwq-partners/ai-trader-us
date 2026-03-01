@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026-03-02] 심층 코드 분석 기반 구조 개선 (P0 2건 + P1 3건)
+
+**수정 파일**:
+- `src/core/live_engine.py` — SEPA check_exit() 호출, 스크리너 순환 스캔, 섹터 다각화 연결, exit_stages 영속화
+- `src/strategies/exit_manager.py` — `get_stages()`/`restore_stages()` 메서드 추가
+- `src/execution/broker/kis_us_broker.py` — 체결내역 페이지네이션 추가 (`_api_get` tr_cont 헤더 반환)
+
+### P0 수정 (2건)
+- **exit_stages 영속화 (P0-A)**: 봇 재시작 시 분할익절 단계 초기화 → `highest_prices.json`에 함께 저장/복원. 스케일업 시 수익 누수 방지
+- **KIS 체결내역 페이지네이션 (P0-B)**: `get_order_history()` 단일 페이지만 조회 → `CTX_AREA_FK200/NK200` + `tr_cont` 헤더 기반 연속조회 (최대 10페이지, IRP 중복 방지)
+
+### P1 수정 (3건)
+- **SEPA check_exit() 미호출 (P1-B)**: `_check_exits()`에서 ExitManager만 호출 → 전략별 `check_exit()` 선행 호출 추가 (SEPA MA50 이탈 등)
+- **스크리너 알파벳 편향 (P1-D)**: `universe[:300]` 고정 슬라이스 → 순환 오프셋(`_scan_offset`) 매 사이클 회전
+- **섹터 다각화 미작동 (P1-C)**: `can_open_position(sector=None)` 항상 전달 → `_sector_cache`에서 섹터 조회, `Position.sector` 설정
+
+---
+
 ## [2026-03-02] 장외 시간 불필요한 API 호출 억제
 
 **수정 파일**: `src/core/live_engine.py`

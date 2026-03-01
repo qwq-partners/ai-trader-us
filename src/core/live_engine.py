@@ -141,6 +141,7 @@ class LiveEngine:
         self._pending_symbols: Set[str] = set()
         self._signal_cooldown: Dict[str, datetime] = {}  # symbol -> last_signal_time
         self._exchange_cache: Dict[str, str] = {}  # symbol -> exchange_code
+        self._sector_cache: Dict[str, str] = {}  # symbol -> sector (섹터 다각화 체크용)
         self._indicator_cache: Dict[str, dict] = {}  # symbol -> indicators (스크리닝 사이클마다 갱신)
         self._universe: List[str] = []
         self._tasks: List[asyncio.Task] = []
@@ -534,8 +535,9 @@ class LiveEngine:
         """시그널을 주문으로 변환"""
         symbol = signal.symbol
 
-        # 리스크 체크
-        if not self.risk_manager.can_open_position(self.portfolio, signal):
+        # 리스크 체크 (섹터 다각화 포함)
+        sector = self._sector_cache.get(symbol)
+        if not self.risk_manager.can_open_position(self.portfolio, signal, sector=sector):
             logger.info(f"[시그널] {symbol} — 리스크 체크 실패")
             return False
 
@@ -704,10 +706,27 @@ class LiveEngine:
                 # ATR 계산
                 atr_val = await self._get_atr(symbol)
 
-                # ExitManager 체크
-                exit_signal = self.exit_manager.check_exit(position, price, atr_val)
-                if exit_signal:
-                    await self._execute_exit(symbol, position, exit_signal, exchange)
+                # 전략별 커스텀 exit 체크 (SEPA MA50 이탈 등)
+                if position.strategy:
+                    for strat in self.strategies:
+                        if strat.strategy_type.value == position.strategy:
+                            history = self.data_store.load(symbol)
+                            if history is not None and len(history) >= 50:
+                                custom_reason = strat.check_exit(symbol, history, position)
+                                if custom_reason:
+                                    logger.info(f"[전략 청산] {symbol} — {custom_reason}")
+                                    await self._execute_exit(
+                                        symbol, position,
+                                        {'action': 'close', 'ratio': 1.0, 'reason': custom_reason},
+                                        exchange,
+                                    )
+                            break
+
+                # ExitManager 체크 (전략 exit에서 청산 안 한 경우)
+                if symbol not in self._pending_symbols:
+                    exit_signal = self.exit_manager.check_exit(position, price, atr_val)
+                    if exit_signal:
+                        await self._execute_exit(symbol, position, exit_signal, exchange)
 
             except Exception as e:
                 logger.debug(f"[청산 체크] {symbol} 오류: {e}")
@@ -814,23 +833,45 @@ class LiveEngine:
         try:
             path = self._hp_cache_path()
             if path.exists():
-                return json.loads(path.read_text())
+                raw = json.loads(path.read_text())
+                # 신규 포맷: {"highest_prices": {...}, "exit_stages": {...}}
+                if isinstance(raw, dict) and "highest_prices" in raw:
+                    return raw.get("highest_prices", {})
+                # 구형 포맷: {symbol: float, ...} (하위 호환)
+                return raw
+        except Exception:
+            pass
+        return {}
+
+    def _load_exit_stages(self) -> dict:
+        """캐시에서 exit_stages 로드"""
+        import json
+        try:
+            path = self._hp_cache_path()
+            if path.exists():
+                raw = json.loads(path.read_text())
+                if isinstance(raw, dict) and "exit_stages" in raw:
+                    return raw.get("exit_stages", {})
         except Exception:
             pass
         return {}
 
     def _save_highest_prices(self):
-        """현재 포지션의 highest_price → 캐시 저장"""
+        """현재 포지션의 highest_price + exit_stages → 캐시 저장"""
         import json
         try:
-            data = {
+            hp = {
                 sym: float(pos.highest_price)
                 for sym, pos in self.portfolio.positions.items()
                 if pos.highest_price is not None
             }
+            data = {
+                "highest_prices": hp,
+                "exit_stages": self.exit_manager.get_stages(),
+            }
             self._hp_cache_path().write_text(json.dumps(data))
         except Exception as e:
-            logger.debug(f"[동기화] highest_price 저장 실패: {e}")
+            logger.debug(f"[동기화] 상태 캐시 저장 실패: {e}")
 
     async def _sync_portfolio(self):
         """KIS 잔고와 로컬 포트폴리오 동기화 (단일 API 호출)"""
@@ -844,8 +885,12 @@ class LiveEngine:
         if account_info:
             self.portfolio.cash = Decimal(str(account_info.get("available_cash", 0)))
 
-        # highest_price 캐시 로드 (재시작 시 trailing stop 고점 복원)
+        # highest_price + exit_stages 캐시 로드 (재시작 시 상태 복원)
         hp_cache = self._load_highest_prices()
+        stages_cache = self._load_exit_stages()
+        if stages_cache:
+            self.exit_manager.restore_stages(stages_cache)
+            logger.info(f"[동기화] exit_stages 복원: {len(stages_cache)}개")
 
         # 포지션
         kis_positions = balance.get("positions", [])
@@ -1096,6 +1141,9 @@ class LiveEngine:
                 # 메모리 캐시에 기록 (재시작 후 sync 복원용)
                 if pos.strategy:
                     self._symbol_strategy[symbol] = pos.strategy
+                # 섹터 설정 (섹터 다각화 체크용)
+                if symbol in self._sector_cache:
+                    pos.sector = self._sector_cache[symbol]
                 # P1-1a: highest_price 초기화 (트레일링 스탑 활성화)
                 if pos.highest_price is None:
                     pos.highest_price = pos.current_price
@@ -1463,13 +1511,25 @@ class LiveEngine:
             logger.debug(f"[Watchlist] {symbol} 평가 실패: {e}")
 
     async def _screener_loop(self):
-        """유니버스 스크리닝 (60분 주기, 장중만)"""
+        """유니버스 스크리닝 (60분 주기, 장중만, 순환 스캔)"""
         await asyncio.sleep(30)  # 초기 대기
+        _scan_offset = 0  # 순환 오프셋 (알파벳 편향 방지)
 
         while self._running:
             try:
                 if self.session.is_market_open():
-                    symbols = self._universe[:300]
+                    # 순환 스캔: 매 사이클마다 다음 300개 종목
+                    batch_size = 300
+                    total = len(self._universe)
+                    if total <= batch_size:
+                        symbols = self._universe
+                    else:
+                        end = _scan_offset + batch_size
+                        if end <= total:
+                            symbols = self._universe[_scan_offset:end]
+                        else:
+                            symbols = self._universe[_scan_offset:] + self._universe[:end - total]
+                        _scan_offset = (_scan_offset + batch_size) % total
                     if symbols:
                         result = await asyncio.to_thread(
                             self.screener.scan, symbols,
@@ -1582,6 +1642,10 @@ class LiveEngine:
             info = await asyncio.to_thread(self.data_provider.get_info, symbol)
             raw_exchange = info.get("exchange", "") or ""
             exchange = EXCHANGE_MAP.get(raw_exchange.upper(), self._default_exchange)
+            # sector도 함께 캐시 (추가 API 호출 없이 섹터 다각화 체크 지원)
+            sector = info.get("sector", "") or ""
+            if sector:
+                self._sector_cache[symbol] = sector
         except Exception:
             exchange = self._default_exchange
 
