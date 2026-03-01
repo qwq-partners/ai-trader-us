@@ -35,6 +35,7 @@ from .types import (
 )
 from ..data.feeds.finnhub_ws import FinnhubWSFeed
 from ..data.providers.earnings_provider import EarningsProvider
+from ..data.providers.finviz_provider import FinvizProvider
 from ..data.providers.news_provider import FinnhubNewsProvider, CompositeNewsProvider
 from ..data.providers.sentiment_scorer import SentimentScorer
 from ..data.providers.us_theme_detector import USThemeDetector
@@ -108,8 +109,14 @@ class LiveEngine:
         self._earnings_today: Set[str] = set()          # 오늘/어제 어닝 발표 종목
         self._earnings_last_refresh: Optional[date] = None  # 마지막 갱신일
 
+        # Finviz 기관 수급 프로바이더
+        finviz_token = os.getenv("FINVIZ_API_TOKEN", "")
+        self.finviz_provider = FinvizProvider(finviz_token)
+        self._finviz_last_refresh: Optional[date] = None  # 마지막 갱신일
+
         # 스크리너 결과 캐시
-        self.screener = StockScreener(provider=self.data_provider)
+        self.screener = StockScreener(provider=self.data_provider,
+                                      finviz=self.finviz_provider)
         self._last_screen_result = None
         self._last_screen_time: Optional[datetime] = None
 
@@ -329,6 +336,20 @@ class LiveEngine:
                         self._earnings_last_refresh = today
                     except Exception as e:
                         logger.warning(f"[Earnings] 갱신 실패: {e}")
+
+                # Finviz 수급 데이터 갱신 (1일 1회, 장 시작 후)
+                if self._finviz_last_refresh != today:
+                    try:
+                        refreshed = await self.finviz_provider.refresh(
+                            self._universe, today
+                        )
+                        self._finviz_last_refresh = today
+                        if refreshed:
+                            logger.info(
+                                f"[Finviz] 갱신 완료: {self.finviz_provider.coverage()}종목"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[Finviz] 갱신 실패: {e}")
 
                 await self._run_screening()
 

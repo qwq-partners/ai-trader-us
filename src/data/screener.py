@@ -16,6 +16,7 @@ import numpy as np
 from loguru import logger
 
 from .providers.yfinance_provider import YFinanceProvider
+from .providers.finviz_provider import FinvizProvider
 from .store import DataStore
 
 
@@ -33,8 +34,15 @@ class ScreenResult:
     rsi: float = 50.0
     pct_from_52w_high: float = 0.0
     atr_pct: float = 0.0
-    score: float = 0.0
+    score: float = 0.0              # 기술적 점수 (0~100)
+    finviz_bonus: float = 0.0       # Finviz 수급/펀더멘털 보너스
+    finviz_meta: dict = field(default_factory=dict)  # inst_trans, short_float 등
     flags: List[str] = field(default_factory=list)
+
+    @property
+    def total_score(self) -> float:
+        """기술점수 + Finviz 보너스 합산 점수"""
+        return self.score + self.finviz_bonus
 
     @property
     def flag_str(self) -> str:
@@ -68,9 +76,15 @@ class ScreenerResult:
 class StockScreener:
     """Scan universe for trading opportunities"""
 
-    def __init__(self, provider: YFinanceProvider = None):
+    def __init__(self, provider: YFinanceProvider = None,
+                 finviz: FinvizProvider = None):
         self._provider = provider or YFinanceProvider()
         self._store = DataStore()
+        self._finviz: Optional[FinvizProvider] = finviz
+
+    def set_finviz(self, finviz: FinvizProvider):
+        """Finviz 프로바이더 주입 (live_engine에서 호출)"""
+        self._finviz = finviz
 
     def scan(
         self,
@@ -106,11 +120,30 @@ class StockScreener:
             if result:
                 screener_result.results.append(result)
 
-        # Sort by composite score
-        screener_result.results.sort(key=lambda r: r.score, reverse=True)
+        # Finviz 보너스 적용 (FinvizProvider가 준비된 경우)
+        if self._finviz and self._finviz.is_ready:
+            bonus_count = 0
+            for result in screener_result.results:
+                bonus = self._finviz.get_bonus_score(result.symbol)
+                meta = self._finviz.get_meta(result.symbol)
+                if bonus != 0 or meta:
+                    result.finviz_bonus = bonus
+                    result.finviz_meta = meta
+                    bonus_count += 1
+            logger.info(
+                f"[Finviz] 보너스 적용: {bonus_count}/{len(screener_result.results)}종목"
+            )
 
+        # total_score(기술 + Finviz) 기준 정렬
+        screener_result.results.sort(key=lambda r: r.total_score, reverse=True)
+
+        finviz_info = (
+            f" | Finviz 커버리지: {self._finviz.coverage()}종목"
+            if self._finviz and self._finviz.is_ready else ""
+        )
         logger.info(
-            f"Screener: {len(screener_result.results)}/{len(symbols)} passed filters"
+            f"Screener: {len(screener_result.results)}/{len(symbols)} passed"
+            f"{finviz_info}"
         )
 
         return screener_result

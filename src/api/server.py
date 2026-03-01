@@ -225,6 +225,9 @@ class APIServer:
                 "pct_from_52w_high": _safe_round(r.pct_from_52w_high, 1),
                 "atr_pct": _safe_round(r.atr_pct),
                 "score": _safe_round(r.score, 1),
+                "total_score": _safe_round(r.total_score, 1),
+                "finviz_bonus": _safe_round(r.finviz_bonus, 1),
+                "finviz_meta": r.finviz_meta if r.finviz_meta else {},
                 "flags": r.flags if r.flags is not None else [],
             })
         return web.json_response(items)
