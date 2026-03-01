@@ -6,7 +6,7 @@ KIS 해외주식 API 기반 라이브 트레이딩 엔진.
 
 태스크:
 1. _screening_loop (15분) — 유니버스 스캔 → 전략 시그널 → 주문
-2. _exit_check_loop (30초) — 보유 포지션 청산 체크 [KIS REST 실시간 기준]
+2. _exit_check_loop (15초) — 보유 포지션 청산 체크 [KIS REST 실시간 기준]
 3. _portfolio_sync_loop (30초) — KIS 잔고 ↔ 로컬 Portfolio 동기화
 4. _order_check_loop (10초) — 미체결 주문 상태 폴링
 5. _eod_close_loop (30초) — 마감 15분 전 DAY 포지션 청산
@@ -652,7 +652,7 @@ class LiveEngine:
     # ============================================================
 
     async def _exit_check_loop(self):
-        """보유 포지션 → ExitManager → 매도 (30초 주기, KIS REST 실시간 가격 기준)
+        """보유 포지션 → ExitManager → 매도 (15초 주기, KIS REST 실시간 가격 기준)
 
         ⚠️ Finnhub WS는 무료 플랜 기준 15분 지연 → exit 결정에 사용 금지.
         항상 KIS REST get_quote()로 실시간 가격 조회 후 exit 판단.
@@ -660,7 +660,7 @@ class LiveEngine:
         while self._running:
             try:
                 if not self.session.is_market_open():
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(15)
                     continue
 
                 await self._check_exits()
@@ -670,7 +670,7 @@ class LiveEngine:
             except Exception as e:
                 logger.exception(f"[청산 체크] 오류: {e}")
 
-            await asyncio.sleep(30)  # 항상 30초 (WS 상태 무관)
+            await asyncio.sleep(15)  # 항상 15초 (WS 상태 무관)
 
     async def _check_exits(self):
         """보유 포지션 순회 → KIS REST 실시간 가격 → 청산 시그널 체크
