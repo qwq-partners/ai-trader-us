@@ -5,12 +5,14 @@ KIS 해외주식 API 기반 라이브 트레이딩 엔진.
 6개 백그라운드 태스크로 스크리닝/주문/청산/동기화 수행.
 
 태스크:
-1. _screening_loop (30분) — 유니버스 스캔 → 전략 시그널 → 주문
+1. _screening_loop (15분) — 유니버스 스캔 → 전략 시그널 → 주문
 2. _exit_check_loop (60초) — 보유 포지션 청산 체크
 3. _portfolio_sync_loop (30초) — KIS 잔고 ↔ 로컬 Portfolio 동기화
 4. _order_check_loop (10초) — 미체결 주문 상태 폴링
 5. _eod_close_loop (30초) — 마감 15분 전 DAY 포지션 청산
 6. _heartbeat_loop (5분) — 상태 로깅
+7. _screener_loop (60분) — S&P500+400 전종목 점수 계산 (pool 갱신)
+8. _watchlist_loop (5분) — 상위 25 + 보유 종목 Finviz 실시간 모니터링
 """
 
 from __future__ import annotations
@@ -249,6 +251,11 @@ class LiveEngine:
             asyncio.create_task(self._screener_loop(), name="screener")
         )
 
+        # 워치리스트 태스크 (상위 25 + 보유 종목 5분 주기 Finviz 실시간 모니터링)
+        self._tasks.append(
+            asyncio.create_task(self._watchlist_loop(), name="watchlist")
+        )
+
         # Finnhub WS 태스크
         if self.ws_feed:
             self._tasks.append(
@@ -267,6 +274,7 @@ class LiveEngine:
             "heartbeat": self._heartbeat_loop,
             "theme_detect": self._theme_detection_loop,
             "screener": self._screener_loop,
+            "watchlist": self._watchlist_loop,
         }
         try:
             while self._running:
@@ -1229,6 +1237,146 @@ class LiveEngine:
     # ============================================================
     # 태스크 8: 스크리너 루프
     # ============================================================
+
+    async def _watchlist_loop(self):
+        """
+        상위 후보 + 보유 포지션 Finviz 실시간 모니터링 (5분 주기).
+
+        목적:
+          - 상위 후보(StockScreener Top 25): 강한 장중 모멘텀 감지 시
+            15분 스캔 사이클 대기 없이 즉시 전략 평가 → 시그널 발행
+          - 보유 포지션: 모멘텀 급락(ms<25, 1h≤-2.5%) 감지 시 exit check 즉시 트리거
+
+        Finviz `get_intraday_scan()` TTL=5분이므로 주기와 정합.
+        진입 조건: momentum_score ≥ 75 AND perf_1h ≥ 0.5%
+        워치리스트 쿨다운: 15분 (스크리닝 메인 쿨다운과 별도)
+        """
+        await asyncio.sleep(150)  # 초기 대기 (스크리닝 루프와 시간 분산)
+
+        _wl_cooldown: Dict[str, datetime] = {}
+        _WL_COOLDOWN_SEC = 900  # 15분
+
+        while self._running:
+            try:
+                if not self.session.is_market_open() or not self.finviz_provider.is_ready:
+                    await asyncio.sleep(300)
+                    continue
+
+                held = set(self.portfolio.positions.keys())
+
+                # 모니터링 대상: StockScreener 상위 25 + 보유 종목
+                top_candidates: List[str] = []
+                if self._last_screen_result and self._last_screen_result.results:
+                    top_candidates = [
+                        r.symbol for r in self._last_screen_result.results[:25]
+                        if r.symbol not in held
+                    ]
+
+                watch_symbols = list(set(top_candidates) | held)
+                if not watch_symbols:
+                    await asyncio.sleep(300)
+                    continue
+
+                # Finviz 장중 배치 스캔 (TTL 5분 캐시 재사용)
+                intraday = await self.finviz_provider.get_intraday_scan(watch_symbols)
+
+                # ── 보유 포지션: 모멘텀 급락 → exit check 즉시 ─────────────
+                for sym in list(held):
+                    d = intraday.get(sym, {})
+                    ms   = d.get("momentum_score", 50.0)
+                    p1h  = d.get("perf_1h", 0.0)
+                    if ms < 25 and p1h <= -2.5:
+                        logger.warning(
+                            f"[Watchlist] {sym} 보유 모멘텀 급락 "
+                            f"(ms={ms:.0f}, 1h={p1h:+.2f}%) — exit 즉시 체크"
+                        )
+                        await self._check_exits()
+                        break  # 한 번만 트리거
+
+                # ── 상위 후보: 강한 모멘텀 → 즉시 전략 평가 ──────────────
+                now = datetime.now()
+                for sym in top_candidates:
+                    d = intraday.get(sym, {})
+                    ms   = d.get("momentum_score", 50.0)
+                    p1h  = d.get("perf_1h", 0.0)
+                    p30m = d.get("perf_30m", 0.0)
+
+                    # 강한 장중 모멘텀 기준
+                    if ms < 75 or p1h < 0.5:
+                        continue
+
+                    # 워치리스트 쿨다운 체크 (15분)
+                    last_wl = _wl_cooldown.get(sym)
+                    if last_wl and (now - last_wl).total_seconds() < _WL_COOLDOWN_SEC:
+                        continue
+
+                    # 기존 스크리닝 쿨다운 + 주문 중 확인
+                    if self._is_in_cooldown(sym) or sym in self._pending_symbols:
+                        continue
+
+                    logger.info(
+                        f"[Watchlist] {sym} 강한 모멘텀 감지 "
+                        f"(ms={ms:.0f}, 1h={p1h:+.2f}%, 30m={p30m:+.2f}%) "
+                        f"→ 즉시 전략 평가"
+                    )
+                    _wl_cooldown[sym] = now
+                    await self._evaluate_watchlist_candidate(sym)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[Watchlist] 오류: {e}")
+
+            await asyncio.sleep(300)  # 5분
+
+    async def _evaluate_watchlist_candidate(self, symbol: str):
+        """워치리스트 후보 즉시 전략 평가 (단일 종목, _run_screening과 동일 로직)."""
+        try:
+            history = await self._get_history(symbol)
+            if history is None or len(history) < 50:
+                return
+
+            last_close = float(history["close"].iloc[-1])
+            uni_max_price = float(
+                (self.config.raw.get("universe") or {}).get("max_price", 0)
+            )
+            if uni_max_price > 0 and last_close > uni_max_price:
+                return
+
+            try:
+                self._indicator_cache[symbol] = compute_indicators(history)
+            except Exception:
+                pass
+
+            for strategy in self.strategies:
+                if (
+                    strategy.name == "earnings_drift"
+                    and self._earnings_today
+                    and symbol not in self._earnings_today
+                ):
+                    continue
+
+                signal = strategy.evaluate(symbol, history, self.portfolio)
+                if signal and self.finviz_provider.is_ready:
+                    fz = self.finviz_provider.get_strategy_signals(symbol, strategy.name)
+                    if not fz["pass"]:
+                        signal = None
+                    else:
+                        signal.score = max(0.0, signal.score + fz["score_adjustment"])
+                        if fz["reasons"]:
+                            signal.reason += " | " + ", ".join(fz["reasons"][:2])
+                        signal.reason = "[WL] " + signal.reason
+
+                if signal:
+                    logger.info(
+                        f"[Watchlist] {symbol} 즉시 시그널: "
+                        f"{strategy.name} score={signal.score:.1f}"
+                    )
+                    await self._process_signal(signal)
+                    break
+
+        except Exception as e:
+            logger.debug(f"[Watchlist] {symbol} 평가 실패: {e}")
 
     async def _screener_loop(self):
         """유니버스 스크리닝 (60분 주기, 장중만)"""
