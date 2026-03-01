@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-03-01 — US 전략 전면 개선 (P1/P2/P3) — commit `b03eca1`
+
+**P1-A: StockScreener → 전략 스캔 연동**
+- `live_engine.py`: `_run_screening()`에서 `_last_screen_result` 점수순 상위 150개를 후보 pool로 사용
+- 기존 랜덤 샘플 → 스크리너 결과 없을 때만 폴백
+
+**P1-B: EarningsDrift 어닝 캘린더 연동**
+- `src/data/providers/earnings_provider.py` 신규
+  - Finnhub `GET /calendar/earnings` 어제~내일 조회
+  - 1일 로컬 캐시 (`~/.cache/ai_trader_us/earnings_YYYY-MM-DD.json`)
+- `live_engine.py`: `_earnings_today` Set 관리, 장 시작 시 1일 1회 갱신
+- EarningsDrift는 `_earnings_today` 종목에만 적용 (API 키 없으면 전체 적용 유지)
+
+**P2: 파라미터 조정 (config/default.yml)**
+- `trailing_stop_pct`: 2.0 → 3.0 (US 일중 ATR 2~3% 기준)
+- `stop_loss_pct`: 3.0 → 4.0 (일중 노이즈 필터)
+- `momentum.volume_surge_ratio`: 1.2 → 1.8 (기관 주도 돌파 기준)
+
+**P3: 동적 max_price + 금액 기준 최소 1주**
+- `_run_screening()`: `effective_max_price = cash × max_position_pct%` 동적 계산
+- `RiskManager.calculate_position_size(allow_min_one=True)`: qty=0이어도 주가 ≤ max_position_value이고 현금 ≥ 주가이면 1주 강제
+  - KIS 소수주 불가 → 금액 기준 최소 단위 보장 (정수 주문)
+- `_process_signal()`: `allow_min_one=True` 전달
+
+**KIS 소수주 주문 불가 결론**
+- `ORD_QTY` 정수 전용 → 소수주/금액 기준 주문 API 레벨 불가
+- 엔진 레벨에서 `floor(목표금액/주가)` + `allow_min_one` 방식으로 대응
+
+---
+
+## 2026-03-01 — 대시보드 테마 탭 개선 — commits `1ea8365`, `6c0a34e`
+
+- 뉴스 건수 불일치 수정: `news_count` → `newsItems.length` (KR/US 모두)
+- KR 스크리닝 종목명만 표시 (심볼 코드 제거)
+- themes.js v4
+
+---
+
 ## 2026-03-01 — US 테마 탐지 + 스크리닝 통합
 
 **신규 파일**:
