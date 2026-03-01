@@ -793,6 +793,38 @@ class LiveEngine:
 
             await asyncio.sleep(self._position_sync_sec)
 
+    # ── highest_price 영속화 헬퍼 ──────────────────────────────────────────────
+    @staticmethod
+    def _hp_cache_path() -> "Path":
+        from pathlib import Path
+        p = Path.home() / ".cache" / "ai_trader_us"
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "highest_prices.json"
+
+    def _load_highest_prices(self) -> dict:
+        """캐시에서 highest_price 로드 {symbol: float}"""
+        import json
+        try:
+            path = self._hp_cache_path()
+            if path.exists():
+                return json.loads(path.read_text())
+        except Exception:
+            pass
+        return {}
+
+    def _save_highest_prices(self):
+        """현재 포지션의 highest_price → 캐시 저장"""
+        import json
+        try:
+            data = {
+                sym: float(pos.highest_price)
+                for sym, pos in self.portfolio.positions.items()
+                if pos.highest_price is not None
+            }
+            self._hp_cache_path().write_text(json.dumps(data))
+        except Exception as e:
+            logger.debug(f"[동기화] highest_price 저장 실패: {e}")
+
     async def _sync_portfolio(self):
         """KIS 잔고와 로컬 포트폴리오 동기화 (단일 API 호출)"""
         # get_balance()로 포지션 + 계좌 정보를 한번에 조회
@@ -804,6 +836,9 @@ class LiveEngine:
         account_info = balance.get("account", {})
         if account_info:
             self.portfolio.cash = Decimal(str(account_info.get("available_cash", 0)))
+
+        # highest_price 캐시 로드 (재시작 시 trailing stop 고점 복원)
+        hp_cache = self._load_highest_prices()
 
         # 포지션
         kis_positions = balance.get("positions", [])
@@ -825,18 +860,30 @@ class LiveEngine:
                 self._exchange_cache[symbol] = kp.get("exchange", self._default_exchange)
             else:
                 # 새 포지션 (외부 진입 또는 체결 반영)
+                # highest_price: 캐시 복원 우선 (재시작 후 trailing stop 고점 유지)
+                cached_hp = hp_cache.get(symbol, 0.0)
+                cur_price = float(kp["current_price"])
+                restored_hp = max(cached_hp, cur_price)  # 캐시·현재가 중 큰 값
                 self.portfolio.positions[symbol] = Position(
                     symbol=symbol,
                     name=kp.get("name", ""),
                     side=PositionSide.LONG,
                     quantity=kp["qty"],
                     avg_price=Decimal(str(kp["avg_price"])),
-                    current_price=Decimal(str(kp["current_price"])),
-                    highest_price=Decimal(str(kp["current_price"])),  # P1-1b
+                    current_price=Decimal(str(cur_price)),
+                    highest_price=Decimal(str(restored_hp)),
                     entry_time=datetime.now(),
                 )
+                if cached_hp > cur_price:
+                    logger.info(
+                        f"[동기화] {symbol} highest_price 복원: "
+                        f"${cached_hp:.2f} (현재가 ${cur_price:.2f})"
+                    )
                 # 거래소 캐시
                 self._exchange_cache[symbol] = kp.get("exchange", self._default_exchange)
+
+        # highest_price 캐시 저장 (30초마다, 재시작 대비)
+        self._save_highest_prices()
 
         # KIS에 없는 포지션 → 청산 처리
         for symbol in list(self.portfolio.positions.keys()):

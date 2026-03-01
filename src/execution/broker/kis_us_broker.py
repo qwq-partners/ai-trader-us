@@ -295,10 +295,17 @@ class KISUSBroker:
             if qty <= 0:
                 continue
 
-            avg_price = float(item.get("PCH_AMT", "0") or "0")
+            # avg_price: PCH_AMT는 WCRC_FRCR_DVSN_CD=02일 때 KRW 총액 → 사용 불가.
+            # EVLU_PFLS_RT1(손익률%)와 OVRS_NOW_PRIC1(현재가 USD)로 역산:
+            #   avg = current / (1 + pnl_pct/100)
             current_price = float(item.get("OVRS_NOW_PRIC1", "0") or "0")
-            pnl = float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0")
             pnl_pct = float(item.get("EVLU_PFLS_RT1", "0") or "0")
+            if current_price > 0 and abs(pnl_pct) < 99.9:
+                avg_price = current_price / (1 + pnl_pct / 100)
+            else:
+                avg_price = current_price  # 폴백 (손익률 이상값 방어)
+
+            pnl = float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0")
 
             positions.append({
                 "symbol": item.get("OVRS_PDNO", "").strip(),
@@ -341,14 +348,18 @@ class KISUSBroker:
             qty = int(item.get("CBLC_QTY", "0") or "0")
             if qty <= 0:
                 continue
+            # avg_price: PCH_AMT는 KRW 총액(WCRC_FRCR_DVSN_CD=02) → USD 주당가 역산
+            cur = float(item.get("OVRS_NOW_PRIC1", "0") or "0")
+            pnl_rt = float(item.get("EVLU_PFLS_RT1", "0") or "0")
+            avg_usd = (cur / (1 + pnl_rt / 100)) if (cur > 0 and abs(pnl_rt) < 99.9) else cur
             positions.append({
                 "symbol": item.get("OVRS_PDNO", "").strip(),
                 "name": item.get("OVRS_ITEM_NAME", "").strip(),
                 "qty": qty,
-                "avg_price": float(item.get("PCH_AMT", "0") or "0"),
-                "current_price": float(item.get("OVRS_NOW_PRIC1", "0") or "0"),
+                "avg_price": avg_usd,
+                "current_price": cur,
                 "pnl": float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0"),
-                "pnl_pct": float(item.get("EVLU_PFLS_RT1", "0") or "0"),
+                "pnl_pct": pnl_rt,
                 "exchange": item.get("OVRS_EXCG_CD", "NASD"),
             })
 
