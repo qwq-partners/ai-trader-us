@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-03-01 — Finviz Elite API 전면 통합 v2 — commits `9e598ea`, `701e1f3`, `e895d0a`
+
+### FinvizProvider v2 (`src/data/providers/finviz_provider.py`)
+- **DAILY_COLUMNS 확장**: 15 → 24개 (FwdPE/EPS3개/영업이익률/Gross마진/Beta/ATR/목표가/EPS NextQ 추가)
+- **보너스 체계 재설계 (최대 ~90pt, 페널티 ~-25pt)**:
+  - [A] 기관/내부자 수급 +30pt (inst_trans ≥5%: +25pt 최강 신호)
+  - [B] 실적 성장 +25pt (EPS QQ + Next Year + 시너지 +5pt)
+  - [C] 비즈니스 품질 +20pt (영업이익률/ROE/Gross마진 3중)
+  - [D] 애널리스트 +15pt (목표가 괴리율 ≥40%: +10pt 신규)
+  - [E] 밸류에이션 페널티: FwdPE>100: -10pt, FwdPE>60: -5pt
+- **EPS QQ 급락 보정**: `eps_qq ≤ -30%` → 내년 전망 신뢰도 50% 할인
+  - TSLA 수정: +2pt → -2pt (FwdPE 153.7x + 실적 -64%)
+  - CRWD 수정: +23pt → +20pt (어닝 충격 -98% 반영)
+- **신규 메서드**:
+  - `get_strategy_signals(sym, strategy)`: SEPA/Momentum/EarningsDrift 전략별 Finviz 필터
+  - `get_intraday_scan(symbols)`: 5/15/30분/1시간 실시간 퍼포먼스 + 장중 모멘텀 점수(0~100), TTL 5분
+  - `get_risk_multiplier(sym)`: Beta 기반 포지션 보정 (Beta>2.5: 0.7x / >2.0: 0.8x / >1.5: 0.9x)
+  - `get_atr(sym)`, `get_target_upside(sym)` 헬퍼 메서드
+
+### live_engine.py 통합
+- `strategy.evaluate()` 후 `get_strategy_signals()` 적용:
+  - `pass=False` → 시그널 폐기 + 경고 로그
+  - `score_adjustment` → signal.score 반영
+  - `reasons` → signal.reason에 추가 (ex: "기관 매집 2.73%, 목표가 상승여지 45.6%")
+- `_process_signal()`: `get_risk_multiplier()` 적용 → Beta 고위험 종목 자동 축소
+  - ARM(4.17): 30% / NVDA(2.32): 20% / AMD(1.97): 10%
+
+### 대시보드 (ai-trader-v2)
+- US 스크리닝 테이블 9열로 확장 (themes.js v5):
+  - 기관거래% (inst_trans): +2%↑ 초록
+  - 목표가↑ (target_upside): +30%↑ 초록
+  - 점수: total_score(기술+Finviz) + bonus 작은 글씨
+
+---
+
 ## 2026-03-01 — US 전략 전면 개선 (P1/P2/P3) — commit `b03eca1`
 
 **P1-A: StockScreener → 전략 스캔 연동**
