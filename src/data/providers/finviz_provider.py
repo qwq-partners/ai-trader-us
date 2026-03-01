@@ -32,11 +32,11 @@ from loguru import logger
 CACHE_DIR = Path.home() / ".cache" / "ai_trader_us"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Finviz Elite API 컬럼 ID
+# Finviz Elite API 컬럼 ID (실제 검증 완료)
 # 1=Ticker, 22=EPS_QQ, 23=Sales_QQ, 27=InsiderTrans, 28=InstOwn, 29=InstTrans,
-# 30=ShortFloat, 31=ShortRatio, 32=ROA, 33=ROE, 34=ROIC, 57=RSI,
-# 60=AnalystRecom, 61=AvgVol
-COLUMNS = "1,22,23,27,28,29,30,31,32,33,34,57,60,61"
+# 30=ShortFloat, 31=ShortRatio, 32=ROA, 33=ROE, 34=ROIC,
+# 57=52wHigh%, 59=RSI(14), 62=AnalystRecom, 63=AvgVolume
+COLUMNS = "1,22,23,27,28,29,30,31,32,33,34,57,59,62,63"
 
 ELITE_URL = "https://elite.finviz.com/export.ashx"
 BATCH_SIZE = 50  # t= 파라미터 티커 배치 크기
@@ -334,6 +334,8 @@ class FinvizProvider:
             "sales_qq":      _parse_pct(data.get("Sales Growth Quarter Over Quarter", "")),
             "roe":           _parse_pct(data.get("Return on Equity", "")),
             "roa":           _parse_pct(data.get("Return on Assets", "")),
+            "rsi":           _parse_float(data.get("Relative Strength Index (14)", "")),
+            "pct_52w_high":  _parse_pct(data.get("52-Week High", "")),
             "analyst_recom": _parse_float(data.get("Analyst Recom", "")),
             "bonus":         self.get_bonus_score(symbol),
         }
