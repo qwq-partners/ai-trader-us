@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026-03-01] exit_check_loop 주기 단축 — commit `ce7b64f`
+
+- `_exit_check_loop`: 30초 → **15초** (장중/비장중 모두)
+- 빠른 trailing stop / stop-loss 반응 목적
+
+---
+
 ## [2026-03-01] Finnhub WS 15분 지연 대응 — commit `b0a6eda`
 
 ### 문제
