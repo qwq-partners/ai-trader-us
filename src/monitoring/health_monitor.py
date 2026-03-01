@@ -63,13 +63,22 @@ class HealthMonitor:
         except Exception as e:
             logger.debug(f"[HealthMonitor] 손실 체크 실패: {e}")
 
-        # 3. 브로커 연결
+        # 3. 브로커 연결 (sync 루프 성공 여부로 판단, 중복 API 호출 방지)
         try:
-            balance = await self._engine.broker.get_balance()
-            if not balance:
-                msg = "브로커 연결 실패: get_balance() 응답 없음"
-                issues.append(msg)
-                await self._alert("broker_conn", msg)
+            last_sync = getattr(self._engine, '_last_sync_success', None)
+            if last_sync is not None:
+                sync_elapsed = time.time() - last_sync
+                if sync_elapsed > 120:  # 2분 이상 sync 실패
+                    msg = f"브로커 연결 의심: sync {sync_elapsed:.0f}초 전 마지막 성공"
+                    issues.append(msg)
+                    await self._alert("broker_conn", msg)
+            else:
+                # _last_sync_success 미초기화 → 기존 방식 폴백
+                balance = await self._engine.broker.get_balance()
+                if not balance:
+                    msg = "브로커 연결 실패: get_balance() 응답 없음"
+                    issues.append(msg)
+                    await self._alert("broker_conn", msg)
         except Exception as e:
             msg = f"브로커 연결 실패: {e}"
             issues.append(msg)

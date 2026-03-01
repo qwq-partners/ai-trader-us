@@ -9,7 +9,7 @@ Scans universe for trading opportunities based on technical conditions:
 """
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
@@ -104,7 +104,9 @@ class StockScreener:
             vol_surge_threshold: Volume surge multiplier threshold
             lookback_days: Days of history needed
         """
-        today = date.today()
+        # ET 기준 날짜 사용 (서버 KST와 불일치 방지)
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         start = today - timedelta(days=lookback_days + 50)  # Extra buffer
 
         screener_result = ScreenerResult(scan_date=today, total_scanned=len(symbols))

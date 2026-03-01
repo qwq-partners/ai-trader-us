@@ -108,9 +108,12 @@ class TradeJournal:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writerow(row)
 
-    def get_todays_trades(self) -> List[dict]:
-        """오늘 거래 조회"""
-        today_str = date.today().isoformat()
+    def get_todays_trades(self, today: date = None) -> List[dict]:
+        """오늘 거래 조회 (ET 기준 날짜 전달 권장)"""
+        if today is None:
+            from zoneinfo import ZoneInfo
+            today = datetime.now(ZoneInfo("America/New_York")).date()
+        today_str = today.isoformat()
         return self._read_trades(lambda r: r.get("timestamp", "").startswith(today_str))
 
     def get_summary(self) -> dict:

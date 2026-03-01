@@ -11,7 +11,7 @@ Finnhub 무료 tier에서 지원하는 엔드포인트:
 import asyncio
 import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -132,7 +132,8 @@ class EarningsProvider:
         캐시: 1일 (하루 1회 API 호출)
         """
         if today is None:
-            today = date.today()
+            from zoneinfo import ZoneInfo
+            today = datetime.now(ZoneInfo("America/New_York")).date()
 
         # 캐시 확인 (당일 캐시 있으면 바로 반환)
         cached = self._load_cache(today)

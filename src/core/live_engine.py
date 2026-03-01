@@ -148,6 +148,7 @@ class LiveEngine:
         self.recent_signals: deque = deque(maxlen=50)
         self._ws_last_exit_check: Dict[str, float] = {}  # symbol -> last check timestamp
         self._daily_reset_done: Optional[date] = None  # 일일 리셋 추적
+        self._symbol_strategy: Dict[str, str] = {}  # symbol -> strategy (메모리 캐시, sync 복원용)
 
         # 설정값
         self._screening_interval = self._live_cfg.get("screening_interval_min", 30) * 60
@@ -383,6 +384,10 @@ class LiveEngine:
         self._indicator_cache = {
             k: v for k, v in self._indicator_cache.items() if k in held
         }
+
+        # 센티멘트 캐시 정리 (무한 증가 방지)
+        if self.sentiment_scorer:
+            self.sentiment_scorer.clear_cache()
 
         # 쿨다운 만료 항목 정리
         now = datetime.now()
@@ -870,6 +875,16 @@ class LiveEngine:
                     highest_price=Decimal(str(restored_hp)),
                     entry_time=datetime.now(),
                 )
+                # 전략 복원 (메모리 캐시에서)
+                if symbol in self._symbol_strategy:
+                    pos = self.portfolio.positions[symbol]
+                    pos.strategy = self._symbol_strategy[symbol]
+                    # time_horizon 복원
+                    for strat in self.strategies:
+                        if strat.strategy_type.value == pos.strategy:
+                            pos.time_horizon = strat.time_horizon
+                            break
+                    logger.info(f"[동기화] {symbol} 전략 복원: {pos.strategy}")
                 if cached_hp > cur_price:
                     logger.info(
                         f"[동기화] {symbol} highest_price 복원: "
@@ -880,6 +895,9 @@ class LiveEngine:
 
         # highest_price 캐시 저장 (30초마다, 재시작 대비)
         self._save_highest_prices()
+
+        # HealthMonitor용 sync 성공 타임스탬프
+        self._last_sync_success = time.time()
 
         # KIS에 없는 포지션 → 청산 처리
         for symbol in list(self.portfolio.positions.keys()):
@@ -993,43 +1011,50 @@ class LiveEngine:
                         del self._pending_orders[order_no]
                         logger.info(f"[주문 체크] {order_no} 취소 완료")
 
-                        # 매도 취소 후 시장가 폴백 재주문
+                        # 매도 취소 후 시장가 폴백 재주문 (정규장에서만)
                         if pending["side"] == "sell":
                             symbol = pending["symbol"]
                             exchange = pending.get("exchange", self._default_exchange)
                             qty = pending.get("qty", 0)
-                            logger.warning(
-                                f"[주문 체크] {symbol} 매도 시장가 폴백 — {qty}주"
-                            )
-                            fallback = await self.broker.submit_sell_order(
-                                symbol, exchange, qty, price=0,
-                            )
-                            if fallback.get("success"):
-                                fb_order_no = fallback.get("order_no", "").strip()
-                                if not fb_order_no:
-                                    fb_order_no = f"local-{uuid.uuid4().hex[:12]}"
-                                self._pending_orders[fb_order_no] = {
-                                    "symbol": symbol,
-                                    "side": "sell",
-                                    "qty": qty,
-                                    "price": 0,
-                                    "strategy": pending.get("strategy", ""),
-                                    "reason": f"market_fallback({pending.get('reason', '')})",
-                                    "exchange": exchange,
-                                    "submitted_at": datetime.now(),
-                                }
-                                self._pending_symbols.add(symbol)
-                            else:
-                                logger.error(
-                                    f"[주문 체크] {symbol} 시장가 폴백 실패: "
-                                    f"{fallback.get('message')}"
+
+                            if not self.session.is_market_open():
+                                logger.warning(
+                                    f"[주문 체크] {symbol} 정규장 아님 → 시장가 폴백 스킵"
                                 )
-                                # P1-7: 긴급 알림 — 수동 개입 필요
-                                asyncio.create_task(get_notifier().send_alert(
-                                    f"[US] 긴급: 매도 실패\n"
-                                    f"{symbol} {qty}주 — 지정가 취소 + 시장가 모두 실패\n"
-                                    f"수동 확인 필요"
-                                ))
+                                self._pending_symbols.discard(symbol)
+                            else:
+                                logger.warning(
+                                    f"[주문 체크] {symbol} 매도 시장가 폴백 — {qty}주"
+                                )
+                                fallback = await self.broker.submit_sell_order(
+                                    symbol, exchange, qty, price=0,
+                                )
+                                if fallback.get("success"):
+                                    fb_order_no = fallback.get("order_no", "").strip()
+                                    if not fb_order_no:
+                                        fb_order_no = f"local-{uuid.uuid4().hex[:12]}"
+                                    self._pending_orders[fb_order_no] = {
+                                        "symbol": symbol,
+                                        "side": "sell",
+                                        "qty": qty,
+                                        "price": 0,
+                                        "strategy": pending.get("strategy", ""),
+                                        "reason": f"market_fallback({pending.get('reason', '')})",
+                                        "exchange": exchange,
+                                        "submitted_at": datetime.now(),
+                                    }
+                                    self._pending_symbols.add(symbol)
+                                else:
+                                    logger.error(
+                                        f"[주문 체크] {symbol} 시장가 폴백 실패: "
+                                        f"{fallback.get('message')}"
+                                    )
+                                    # P1-7: 긴급 알림 — 수동 개입 필요
+                                    asyncio.create_task(get_notifier().send_alert(
+                                        f"[US] 긴급: 매도 실패\n"
+                                        f"{symbol} {qty}주 — 지정가 취소 + 시장가 모두 실패\n"
+                                        f"수동 확인 필요"
+                                    ))
                     else:
                         logger.error(
                             f"[주문 체크] {order_no} 취소 실패: "
@@ -1062,6 +1087,9 @@ class LiveEngine:
             pos = self.portfolio.positions.get(symbol)
             if pos:
                 pos.strategy = pending.get("strategy", "")
+                # 메모리 캐시에 기록 (재시작 후 sync 복원용)
+                if pos.strategy:
+                    self._symbol_strategy[symbol] = pos.strategy
                 # P1-1a: highest_price 초기화 (트레일링 스탑 활성화)
                 if pos.highest_price is None:
                     pos.highest_price = pos.current_price
@@ -1305,6 +1333,13 @@ class LiveEngine:
                     await asyncio.sleep(300)
                     continue
 
+                # 쿨다운 만료 항목 정리 (메모리 누수 방지)
+                now = datetime.now()
+                expired_wl = [s for s, t in _wl_cooldown.items()
+                              if (now - t).total_seconds() > _WL_COOLDOWN_SEC * 2]
+                for s in expired_wl:
+                    del _wl_cooldown[s]
+
                 held = set(self.portfolio.positions.keys())
 
                 # 모니터링 대상: StockScreener 상위 25 + 보유 종목
@@ -1474,7 +1509,7 @@ class LiveEngine:
         """종목 히스토리 로드 (캐시 → yfinance, 동기 IO는 to_thread로 래핑)"""
         # 캐시 확인
         cached = self.data_store.load(symbol)
-        today = date.today()
+        today = self.session.now_et().date()
 
         if cached is not None and not cached.empty:
             last_date = cached.index[-1]

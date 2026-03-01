@@ -1,5 +1,49 @@
 # Changelog
 
+## [2026-03-02] 전체 코드 리뷰 이슈 수정 (P0 3건 + P1 5건)
+
+**수정 파일**:
+- `src/utils/kis_auth.py` — asyncio.Lock 클래스 변수 → lazy init (`_get_lock()`)
+- `src/core/live_engine.py` — `date.today()` → ET 기준, 전략 메모리 캐시 복원, 센티멘트 캐시 정리, wl_cooldown 만료 정리, 시장가 폴백 정규장 가드, sync 타임스탬프
+- `src/data/providers/finviz_provider.py` — Forward P/E 체인 비교 오류 수정 (`0 < x > 100` → `x > 100`)
+- `src/monitoring/health_monitor.py` — `get_balance()` 중복 호출 → sync 성공 타임스탬프 기반 판단
+- `src/utils/trade_journal.py` — `get_todays_trades()` ET 기준 날짜 사용
+- `src/data/screener.py` — `scan()` ET 기준 날짜 사용
+- `src/data/providers/earnings_provider.py` — `get_today_earnings()` 기본값 ET 기준
+
+### P0 수정 (3건)
+- **asyncio.Lock 클래스 변수**: 이벤트 루프 불일치 시 교착/RuntimeError → lazy init
+- **date.today() KST/ET 불일치**: 서버 KST에서 US 시장 ET와 최대 14시간 차이 → `session.now_et().date()` 사용
+- **Forward P/E 체인 비교**: Python `0 < x > 100` = `x > 100` (의도와 다른 조건) → 명확한 비교 연산자
+
+### P1 수정 (5건)
+- sync 포지션 strategy/time_horizon 메모리 캐시 복원 (EOD close 누락 방지)
+- HealthMonitor `get_balance()` 중복 API 호출 제거 (sync 타임스탬프 기반)
+- SentimentScorer 캐시 무한 증가 → 스크리닝 루프에서 `clear_cache()` 호출
+- `_wl_cooldown` dict 만료 항목 정리 (메모리 누수 방지)
+- 매도 시장가 폴백에 정규장 시간 가드 추가 (Pre/After-hours 거부 방지)
+
+---
+
+## [2026-03-01] positions API에 `entry_time` 필드 추가
+
+**수정 파일**: `src/api/server.py`
+
+- `GET /api/us/positions` 응답에 `entry_time` (ISO format) 필드 추가
+- KR 대시보드에서 US 포지션 보유시간 표시에 사용
+
+---
+
+## [2026-03-01] `/api/us/risk` 엔드포인트 추가
+
+**수정 파일**: `src/api/server.py`
+
+- 리스크 정보 반환 API: `GET /api/us/risk`
+- 반환 필드: `can_trade`, `daily_loss_pct`, `daily_loss_limit_pct`, `daily_trades`, `position_count`, `max_positions`, `consecutive_losses`, `signals_generated`, `ws_subscribed`
+- KR 대시보드 프록시 경유 조회용 (`/api/us-proxy/api/us/risk`)
+
+---
+
 ## [2026-03-01] exit_check_loop 주기 단축 — commit `ce7b64f`
 
 - `_exit_check_loop`: 30초 → **15초** (장중/비장중 모두)

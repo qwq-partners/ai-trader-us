@@ -502,9 +502,9 @@ class FinvizProvider:
 
         # ── [E] 밸류에이션/리스크 페널티 ────────────────────────────────
         fwd_pe = _flt(data.get("Forward P/E", ""))
-        if 0 < fwd_pe > 100:
+        if fwd_pe > 100:
             bonus -= 10   # 극단적 고평가 (TSLA 153x 등)
-        elif 0 < fwd_pe > 60:
+        elif fwd_pe > 60:
             bonus -= 5    # 고평가
 
         # 고공매도 비율 (쇼트 스퀴즈 위험 or 시장 불신)

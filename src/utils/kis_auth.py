@@ -34,7 +34,13 @@ class KISTokenManager:
     """
 
     _instance: Optional["KISTokenManager"] = None
-    _lock: asyncio.Lock = asyncio.Lock()
+    _lock: Optional[asyncio.Lock] = None
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
 
     def __new__(cls):
         if cls._instance is None:
@@ -81,7 +87,7 @@ class KISTokenManager:
 
     async def get_access_token(self) -> Optional[str]:
         """REST API용 Access Token 반환 (자동 갱신)"""
-        async with self._lock:
+        async with self._get_lock():
             if self._is_token_valid():
                 return self._access_token
 
@@ -90,7 +96,7 @@ class KISTokenManager:
 
     async def refresh(self) -> bool:
         """토큰 강제 갱신"""
-        async with self._lock:
+        async with self._get_lock():
             return await self._issue_access_token()
 
     def invalidate(self):
