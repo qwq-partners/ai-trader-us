@@ -1,5 +1,27 @@
 # Changelog
 
+## [2026-03-01] Finnhub WS 15분 지연 대응 — commit `b0a6eda`
+
+### 문제
+- Finnhub 무료 플랜 WS: US 주식 **15분 지연** (실시간 아님)
+- 기존 `_on_ws_price()`에서 exit check 트리거 → 오래된 가격으로 trailing/stop 판단 → 오판 위험
+
+### 수정
+- `_on_ws_price()`: exit check 제거, `current_price` 디스플레이 갱신만 유지
+- `_check_exits()`: 항상 KIS REST `get_quote()` 실시간 가격 사용
+  - `ws_connected` 조건 분기 제거 (WS 상태 무관)
+  - KIS 실시간 가격으로 `highest_price`도 갱신 (trailing stop 고점 신뢰)
+- `_exit_check_loop()`: 60초 → **30초** 고정 (WS 상태 무관)
+
+### 가격 소스 확정
+| 소스 | 용도 | 지연 |
+|------|------|------|
+| KIS REST `get_quote()` | exit/entry 매매 결정 | 실시간 |
+| Finnhub WS | `current_price` 디스플레이 전용 | **15분** |
+| Finviz Elite REST | 워치리스트/진입 게이트 | TTL 5분 |
+
+---
+
 ## [2026-03-01] 포트폴리오 동기화 버그 수정 — commit `9e89d58`
 
 ### Bug 1: avg_price KRW 오계산 (kis_us_broker.py)
