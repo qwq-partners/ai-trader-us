@@ -122,7 +122,7 @@ live:
   max_signals_per_cycle: 2         # 사이클당 최대 주문 수
   signal_cooldown_sec: 300        # 종목당 시그널 쿨다운 (초)
   position_sync_sec: 30           # 포트폴리오 동기화 주기
-  exit_check_sec: 60              # 청산 체크 주기
+  exit_check_sec: 30              # 청산 체크 주기 (KIS REST 실시간 — WS 15분 지연 미사용)
   order_check_sec: 10             # 주문 상태 폴링 주기
   heartbeat_sec: 300              # 하트비트 주기
   default_exchange: NASD          # 기본 거래소 코드

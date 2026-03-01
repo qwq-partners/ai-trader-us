@@ -6,13 +6,18 @@ KIS 해외주식 API 기반 라이브 트레이딩 엔진.
 
 태스크:
 1. _screening_loop (15분) — 유니버스 스캔 → 전략 시그널 → 주문
-2. _exit_check_loop (60초) — 보유 포지션 청산 체크
+2. _exit_check_loop (30초) — 보유 포지션 청산 체크 [KIS REST 실시간 기준]
 3. _portfolio_sync_loop (30초) — KIS 잔고 ↔ 로컬 Portfolio 동기화
 4. _order_check_loop (10초) — 미체결 주문 상태 폴링
 5. _eod_close_loop (30초) — 마감 15분 전 DAY 포지션 청산
 6. _heartbeat_loop (5분) — 상태 로깅
 7. _screener_loop (60분) — S&P500+400 전종목 점수 계산 (pool 갱신)
 8. _watchlist_loop (5분) — 상위 25 + 보유 종목 Finviz 실시간 모니터링
+
+가격 소스 구분:
+  KIS REST get_quote(): exit/entry 모든 매매 결정 (실시간)
+  Finnhub WS:           current_price 디스플레이 전용 (무료 플랜 15분 지연)
+  Finviz Elite REST:    장중 모멘텀 스냅샷 — 워치리스트/진입 게이트 (TTL 5분)
 """
 
 from __future__ import annotations
@@ -647,8 +652,10 @@ class LiveEngine:
     # ============================================================
 
     async def _exit_check_loop(self):
-        """보유 포지션 → ExitManager → 매도
-        WS 연결 시 60초 (WS 콜백에서 이미 체크), WS 미연결 시 30초 (REST 폴백)
+        """보유 포지션 → ExitManager → 매도 (30초 주기, KIS REST 실시간 가격 기준)
+
+        ⚠️ Finnhub WS는 무료 플랜 기준 15분 지연 → exit 결정에 사용 금지.
+        항상 KIS REST get_quote()로 실시간 가격 조회 후 exit 판단.
         """
         while self._running:
             try:
@@ -663,40 +670,31 @@ class LiveEngine:
             except Exception as e:
                 logger.exception(f"[청산 체크] 오류: {e}")
 
-            # WS 연결 중이면 60초 (WS에서 10초 스로틀로 체크), 미연결이면 30초
-            ws_ok = self.ws_feed and self.ws_feed.is_connected
-            await asyncio.sleep(self._exit_check_sec if ws_ok else 30)
+            await asyncio.sleep(30)  # 항상 30초 (WS 상태 무관)
 
     async def _check_exits(self):
-        """보유 포지션 순회 → 청산 시그널 체크
-        WS 연결 중이면 WS에서 이미 가격 갱신 + exit 체크하므로 REST 스킵.
-        WS 미연결 시 기존 REST 폴링 폴백.
-        """
-        ws_connected = self.ws_feed and self.ws_feed.is_connected
+        """보유 포지션 순회 → KIS REST 실시간 가격 → 청산 시그널 체크
 
+        KIS get_quote()가 primary 가격 소스 (실시간).
+        Finnhub WS 가격(15분 지연)은 display 전용이므로 exit 결정에 미사용.
+        """
         for symbol, position in list(self.portfolio.positions.items()):
             if symbol in self._pending_symbols:
                 continue
 
             try:
-                if ws_connected:
-                    # WS 연결 중: 가격은 WS에서 갱신됨, exit 체크만 수행
-                    price = float(position.current_price)
-                    if price <= 0:
-                        continue
-                else:
-                    # WS 미연결: REST 폴링으로 가격 갱신
-                    exchange = await self._get_exchange(symbol)
-                    quote = await self.broker.get_quote(symbol, exchange)
-                    price = quote.get("price", 0)
-                    if price <= 0:
-                        continue
+                # KIS REST 실시간 현재가 (primary — 항상 사용)
+                exchange = await self._get_exchange(symbol)
+                quote = await self.broker.get_quote(symbol, exchange)
+                price = quote.get("price", 0)
+                if price <= 0:
+                    continue
 
-                    position.current_price = Decimal(str(price))
+                position.current_price = Decimal(str(price))
 
-                    # 최고가 갱신
-                    if position.highest_price is None or position.current_price > position.highest_price:
-                        position.highest_price = position.current_price
+                # 최고가 갱신 (KIS 실시간 기준 — trailing stop 고점 신뢰)
+                if position.highest_price is None or position.current_price > position.highest_price:
+                    position.highest_price = position.current_price
 
                 # ATR 계산
                 atr_val = await self._get_atr(symbol)
@@ -704,8 +702,6 @@ class LiveEngine:
                 # ExitManager 체크
                 exit_signal = self.exit_manager.check_exit(position, price, atr_val)
                 if exit_signal:
-                    if ws_connected:
-                        exchange = await self._get_exchange(symbol)
                     await self._execute_exit(symbol, position, exit_signal, exchange)
 
             except Exception as e:
@@ -1456,27 +1452,19 @@ class LiveEngine:
     # ============================================================
 
     async def _on_ws_price(self, symbol: str, price: float, ts: int):
-        """WS 실시간 체결가 수신 → 포지션 가격 갱신 + 즉시 exit 체크"""
+        """
+        Finnhub WS 체결가 수신.
+
+        ⚠️ Finnhub 무료 플랜 WS는 US 주식 15분 지연 — exit/trading 결정에 사용 금지.
+        current_price 디스플레이 갱신 전용. exit 체크는 KIS REST (_exit_check_loop) 담당.
+        """
         pos = self.portfolio.positions.get(symbol)
         if not pos or symbol in self._pending_symbols:
             return
 
+        # 디스플레이 전용: current_price만 갱신 (15분 지연 데이터 — 참고용)
+        # highest_price / exit check는 KIS REST 실시간 가격 기준으로만 수행
         pos.current_price = Decimal(str(price))
-        if pos.highest_price is None or pos.current_price > pos.highest_price:
-            pos.highest_price = pos.current_price
-
-        # 종목당 10초 최소 간격으로 exit 체크 (스로틀)
-        now = time.monotonic()
-        last = self._ws_last_exit_check.get(symbol, 0)
-        if now - last < 10:
-            return
-        self._ws_last_exit_check[symbol] = now
-
-        atr = await self._get_atr(symbol)
-        exit_signal = self.exit_manager.check_exit(pos, price, atr)
-        if exit_signal:
-            exchange = await self._get_exchange(symbol)
-            await self._execute_exit(symbol, pos, exit_signal, exchange)
 
     # ============================================================
     # 헬퍼
