@@ -252,11 +252,11 @@ class FinvizProvider:
 
         filters = [
             # A: 거래량 급증 + 3% 이상 상승 (프리마켓/장중 핫 종목)
-            "sh_avgvol_o500,sh_price_o10,ta_relvol_o2,ta_change_o3",
-            # B: 신고가 근접 + 4주 모멘텀 (추세 추종 후보)
-            "sh_avgvol_o500,sh_price_o10,ta_highlow52w_nh,ta_perf4w_o10",
-            # C: 어닝 주간 + 5% 이상 갭 (EarningsDrift 후보)
-            "sh_avgvol_o500,sh_price_o10,ta_change_o5,earningsdate_thisweek",
+            "sh_avgvol_o500,sh_price_o10,sh_relvol_o2,ta_change_u3",
+            # B: 신고가 근접 + 4주(월간) +10% 모멘텀 (추세 추종 후보)
+            "sh_avgvol_o500,sh_price_o10,ta_highlow52w_nh,ta_perf_4w10o",
+            # C: 어닝 주간 + 5% 이상 상승 (EarningsDrift 후보)
+            "sh_avgvol_o500,sh_price_o10,ta_change_u5,earningsdate_thisweek",
         ]
         filter_names = ["거래량급증", "신고가모멘텀", "어닝갭"]
 
