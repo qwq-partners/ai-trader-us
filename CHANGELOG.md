@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-03-03] 잔고조회 API 교체 (CTRP6504R → TTTS3012R) + KIS API 3종 통합
+
+**수정 (중요)**:
+- `get_positions()` / `get_balance()`: `CTRP6504R`(체결기준잔고, 장 마감 30분 후만 가능) → `TTTS3012R`(실시간 잔고, 항상 가능)
+  - 장중 HTTP 500 오류 해소
+  - `pchs_avg_pric` 직접 사용 (USD 평균단가 역산 불필요)
+- `get_balance()` 2단계 전략: TTTS3012R(포지션) + CTRP6504R(가용현금, 장후만)
+  - `available_cash=None`이면 `_sync_portfolio`에서 현재 cash 유지 (장중 정상 동작)
+- KIS WS HTS ID 검증: 영문+숫자·6자 이상만 허용, 오류 수신 시 자동 비활성화
+
 ## [2026-03-03] KIS API 3종 통합 + 문서화
 
 **추가**:

@@ -124,7 +124,13 @@ class KISUSBroker:
 
     @property
     def _tr_balance(self) -> str:
+        """체결기준현재잔고 (CTRP6504R) — 장 마감 후 30분부터 이용 가능"""
         return self._tr("CTRP6504R", "VTRP6504R")
+
+    @property
+    def _tr_realtime_balance(self) -> str:
+        """해외주식 잔고 (TTTS3012R) — 실시간, 장중 항상 이용 가능"""
+        return self._tr("TTTS3012R", "VTTS3012R")
 
     @property
     def _tr_quote(self) -> str:
@@ -269,110 +275,141 @@ class KISUSBroker:
 
     async def get_positions(self) -> List[dict]:
         """
-        해외주식 잔고 조회.
+        해외주식 잔고 조회 (TTTS3012R — 실시간, 장중 항상 이용 가능).
 
         Returns:
             [{symbol, qty, avg_price, current_price, pnl, pnl_pct, exchange, name}]
         """
-        url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        # TTTS3012R: 실시간 잔고 (장중/비장 모두 가능)
+        url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
         params = {
-            "CANO": self.config.account_no,
-            "ACNT_PRDT_CD": self.config.account_product_cd,
-            "WCRC_FRCR_DVSN_CD": "02",  # 02=원화
-            "NATN_CD": "840",            # 미국
-            "TR_MKET_CD": "00",          # 전체
-            "INQR_DVSN_CD": "00",        # 전체
+            "CANO":            self.config.account_no,
+            "ACNT_PRDT_CD":    self.config.account_product_cd,
+            "OVRS_EXCG_CD":    "NASD",   # 실전: NASD=미국 전체 (NASDAQ+NYSE+AMEX)
+            "TR_CRCY_CD":      "USD",
+            "CTX_AREA_FK200":  "",
+            "CTX_AREA_NK200":  "",
         }
 
-        data = await self._api_get(url, self._tr_balance, params)
+        data = await self._api_get(url, self._tr_realtime_balance, params)
         if data.get("rt_cd") != "0":
-            logger.error(f"잔고 조회 실패: {data.get('msg1', '')}")
+            logger.error(f"잔고 조회 실패 (TTTS3012R): {data.get('msg1', '')}")
             return []
 
         positions = []
         for item in data.get("output1", []):
-            qty = int(item.get("CBLC_QTY", "0") or "0")
+            qty = int(item.get("ovrs_cblc_qty", "0") or "0")
             if qty <= 0:
                 continue
 
-            # avg_price: PCH_AMT는 WCRC_FRCR_DVSN_CD=02일 때 KRW 총액 → 사용 불가.
-            # EVLU_PFLS_RT1(손익률%)와 OVRS_NOW_PRIC1(현재가 USD)로 역산:
-            #   avg = current / (1 + pnl_pct/100)
-            current_price = float(item.get("OVRS_NOW_PRIC1", "0") or "0")
-            pnl_pct = float(item.get("EVLU_PFLS_RT1", "0") or "0")
-            if current_price > 0 and abs(pnl_pct) < 99.9:
-                avg_price = current_price / (1 + pnl_pct / 100)
-            else:
-                avg_price = current_price  # 폴백 (손익률 이상값 방어)
+            # pchs_avg_pric: USD 매입평균가격 (TTTS3012R은 직접 제공 — 역산 불필요)
+            avg_price     = float(item.get("pchs_avg_pric", "0") or "0")
+            current_price = float(item.get("now_pric2", "0") or "0")
+            pnl           = float(item.get("frcr_evlu_pfls_amt", "0") or "0")
+            pnl_pct       = float(item.get("evlu_pfls_rt", "0") or "0")
 
-            pnl = float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0")
+            # avg_price 이상값 방어 (API 반환 0 또는 과도한 값)
+            if avg_price <= 0 and current_price > 0 and abs(pnl_pct) < 99.9:
+                avg_price = current_price / (1 + pnl_pct / 100)
 
             positions.append({
-                "symbol": item.get("OVRS_PDNO", "").strip(),
-                "name": item.get("OVRS_ITEM_NAME", "").strip(),
-                "qty": qty,
-                "avg_price": avg_price,
+                "symbol":        item.get("ovrs_pdno", "").strip(),
+                "name":          item.get("ovrs_item_name", "").strip(),
+                "qty":           qty,
+                "avg_price":     avg_price,
                 "current_price": current_price,
-                "pnl": pnl,
-                "pnl_pct": pnl_pct,
-                "exchange": item.get("OVRS_EXCG_CD", "NASD"),
+                "pnl":           pnl,
+                "pnl_pct":       pnl_pct,
+                "exchange":      item.get("ovrs_excg_cd", "NASD"),
             })
 
         return positions
 
     async def get_balance(self) -> dict:
         """
-        잔고 + 계좌 정보를 한번에 조회 (API 1회 호출).
+        잔고 + 계좌 정보 조회.
+
+        전략:
+        1. TTTS3012R (실시간 잔고) → 포지션 + P&L (장중 항상 가능)
+        2. CTRP6504R (체결기준잔고) → 가용현금 (장 마감 30분 후부터 가능)
+           실패 시 TTTS3012R output2로 추정값 사용
 
         Returns:
             {positions: [...], account: {total_equity, available_cash, ...}}
         """
-        url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
-        params = {
-            "CANO": self.config.account_no,
-            "ACNT_PRDT_CD": self.config.account_product_cd,
-            "WCRC_FRCR_DVSN_CD": "02",
-            "NATN_CD": "840",
-            "TR_MKET_CD": "00",
-            "INQR_DVSN_CD": "00",
+        # ── 1. TTTS3012R: 실시간 포지션 조회 ───────────────────────────────
+        rt_url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
+        rt_params = {
+            "CANO":           self.config.account_no,
+            "ACNT_PRDT_CD":   self.config.account_product_cd,
+            "OVRS_EXCG_CD":   "NASD",  # 실전: 미국 전체
+            "TR_CRCY_CD":     "USD",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
         }
 
-        data = await self._api_get(url, self._tr_balance, params)
-        if data.get("rt_cd") != "0":
-            logger.error(f"잔고 조회 실패: {data.get('msg1', '')}")
+        rt_data = await self._api_get(rt_url, self._tr_realtime_balance, rt_params)
+        if rt_data.get("rt_cd") != "0":
+            logger.error(f"잔고 조회 실패 (TTTS3012R): {rt_data.get('msg1', '')}")
             return {}
 
         # 포지션 파싱
         positions = []
-        for item in data.get("output1", []):
-            qty = int(item.get("CBLC_QTY", "0") or "0")
+        for item in rt_data.get("output1", []):
+            qty = int(item.get("ovrs_cblc_qty", "0") or "0")
             if qty <= 0:
                 continue
-            # avg_price: PCH_AMT는 KRW 총액(WCRC_FRCR_DVSN_CD=02) → USD 주당가 역산
-            cur = float(item.get("OVRS_NOW_PRIC1", "0") or "0")
-            pnl_rt = float(item.get("EVLU_PFLS_RT1", "0") or "0")
-            avg_usd = (cur / (1 + pnl_rt / 100)) if (cur > 0 and abs(pnl_rt) < 99.9) else cur
+            avg_price     = float(item.get("pchs_avg_pric", "0") or "0")
+            current_price = float(item.get("now_pric2", "0") or "0")
+            pnl_pct       = float(item.get("evlu_pfls_rt", "0") or "0")
+            if avg_price <= 0 and current_price > 0 and abs(pnl_pct) < 99.9:
+                avg_price = current_price / (1 + pnl_pct / 100)
             positions.append({
-                "symbol": item.get("OVRS_PDNO", "").strip(),
-                "name": item.get("OVRS_ITEM_NAME", "").strip(),
-                "qty": qty,
-                "avg_price": avg_usd,
-                "current_price": cur,
-                "pnl": float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0"),
-                "pnl_pct": pnl_rt,
-                "exchange": item.get("OVRS_EXCG_CD", "NASD"),
+                "symbol":        item.get("ovrs_pdno", "").strip(),
+                "name":          item.get("ovrs_item_name", "").strip(),
+                "qty":           qty,
+                "avg_price":     avg_price,
+                "current_price": current_price,
+                "pnl":           float(item.get("frcr_evlu_pfls_amt", "0") or "0"),
+                "pnl_pct":       pnl_pct,
+                "exchange":      item.get("ovrs_excg_cd", "NASD"),
             })
 
-        # 계좌 요약 파싱
-        output3 = data.get("output3", {})
-        if isinstance(output3, list):
-            output3 = output3[0] if output3 else {}
+        # output2: 계좌 요약 (총평가손익 등, 가용현금은 없음)
+        output2 = rt_data.get("output2", {})
+        if isinstance(output2, list):
+            output2 = output2[0] if output2 else {}
+        total_pnl = float(output2.get("ovrs_tot_pfls", "0") or "0")
+
+        # ── 2. CTRP6504R: 가용현금 조회 (장 마감 후만 가능, 실패 시 None) ──
+        available_cash: Optional[float] = None
+        total_equity:   Optional[float] = None
+
+        try:
+            settle_url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+            settle_params = {
+                "CANO":              self.config.account_no,
+                "ACNT_PRDT_CD":      self.config.account_product_cd,
+                "WCRC_FRCR_DVSN_CD": "02",
+                "NATN_CD":           "840",
+                "TR_MKET_CD":        "00",
+                "INQR_DVSN_CD":      "00",
+            }
+            settle_data = await self._api_get(settle_url, self._tr_balance, settle_params)
+            if settle_data.get("rt_cd") == "0":
+                output3 = settle_data.get("output3", {})
+                if isinstance(output3, list):
+                    output3 = output3[0] if output3 else {}
+                available_cash = float(output3.get("FRCR_DRWG_PSBL_AMT_1", "0") or "0")
+                total_equity   = float(output3.get("FRCR_DNCL_AMT_2", "0") or "0")
+                total_pnl      = float(output3.get("OVRS_TOT_PFLS", total_pnl) or total_pnl)
+        except Exception:
+            pass  # 장중에는 HTTP 500 → 무시
 
         account = {
-            "total_equity": float(output3.get("FRCR_DNCL_AMT_2", "0") or "0"),
-            "available_cash": float(output3.get("FRCR_DRWG_PSBL_AMT_1", "0") or "0"),
-            "total_pnl": float(output3.get("OVRS_TOT_PFLS", "0") or "0"),
-            "total_pnl_pct": float(output3.get("TOT_EVLU_PFLS_RT", "0") or "0"),
+            "available_cash": available_cash,   # None이면 _sync_portfolio가 현재값 유지
+            "total_equity":   total_equity,
+            "total_pnl":      total_pnl,
         }
 
         return {"positions": positions, "account": account}

@@ -1060,9 +1060,12 @@ class LiveEngine:
             return
 
         # 계좌 정보 동기화
+        # available_cash=None: 장중 CTRP6504R 미지원 → 현재값 유지 (변경 안 함)
         account_info = balance.get("account", {})
         if account_info:
-            self.portfolio.cash = Decimal(str(account_info.get("available_cash", 0)))
+            cash_val = account_info.get("available_cash")
+            if cash_val is not None and float(cash_val) > 0:
+                self.portfolio.cash = Decimal(str(cash_val))
 
         # highest_price + exit_stages 캐시 로드 (재시작 시 상태 복원)
         hp_cache = self._load_highest_prices()
