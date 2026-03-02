@@ -157,7 +157,8 @@ class USTradeStorage:
 
     def __init__(self, db_url: str = None):
         self.db_url = db_url or os.getenv("DATABASE_URL_US", "")
-        self.pool = None  # asyncpg.Pool
+        # asyncpg는 connect() 시 런타임 임포트 (미설치 시에도 모듈 로드 가능)
+        self.pool: Optional[Any] = None  # asyncpg.Pool (런타임 타입)
         self._db_available = False
 
         # CSV 백업 전담
@@ -166,6 +167,7 @@ class USTradeStorage:
         # 인메모리 캐시: trade_id → TradeRecord
         self._trades: Dict[str, TradeRecord] = {}
         self._today_trades: List[str] = []
+        self._today_date: Optional[date] = None  # _today_trades 기준 날짜
 
         # DB 비동기 쓰기 큐
         self._write_queue: Optional[asyncio.Queue] = None
@@ -220,27 +222,34 @@ class USTradeStorage:
 
     @staticmethod
     def _refine_exit_type(exit_type: str, exit_reason: str) -> str:
-        """exit_reason에 구체적 정보가 있으면 exit_type 세분화"""
+        """exit_reason에 구체적 정보가 있으면 exit_type 세분화
+
+        US ExitManager reason 패턴:
+          stop_loss (...%), trailing_stop (...%), first_exit (...%),
+          second_exit (...%), third_exit (...%), eod_close
+        """
         if not exit_reason:
             return exit_type
         r = exit_reason.lower()
         # take_profit → first/second/third 세분화
         if exit_type in ("take_profit", "unknown", ""):
-            if "1차 익절" in r or "1차익절" in r or "first" in r:
+            if "first" in r:
                 return "first_take_profit"
-            if "2차 익절" in r or "2차익절" in r or "second" in r:
+            if "second" in r:
                 return "second_take_profit"
-            if "3차 익절" in r or "3차익절" in r or "third" in r:
+            if "third" in r:
                 return "third_take_profit"
         # reason에서 추론 가능한데 exit_type이 unknown인 경우
         if exit_type == "unknown":
-            if "손절" in r or "stop" in r:
+            if "stop_loss" in r:
                 return "stop_loss"
-            if "트레일링" in r or "trailing" in r:
+            if "trailing" in r:
                 return "trailing"
-            if "본전" in r or "breakeven" in r:
+            if "breakeven" in r:
                 return "breakeven"
-            if "익절" in r or "profit" in r:
+            if "eod" in r:
+                return "eod_close"
+            if "profit" in r or "exit" in r:
                 return "take_profit"
         return exit_type
 
@@ -320,7 +329,11 @@ class USTradeStorage:
             updated_at=now,
         )
 
-        # 1) 인메모리 캐시
+        # 1) 인메모리 캐시 (일자 전환 시 _today_trades 리셋)
+        today = now.date()
+        if self._today_date != today:
+            self._today_trades.clear()
+            self._today_date = today
         self._trades[trade_id] = trade
         if trade_id not in self._today_trades:
             self._today_trades.append(trade_id)
@@ -384,7 +397,33 @@ class USTradeStorage:
 
         trade = self._trades.get(trade_id)
         if not trade:
-            logger.warning(f"[TradeStorage] 캐시 미보유 trade_id: {trade_id}")
+            # 캐시 미보유 → DB 직접 기록 (봇 재시작 후 캐시 미복구 상태 대비)
+            logger.warning(f"[TradeStorage] 캐시 미보유 trade_id={trade_id}, DB 직접 기록")
+            now = exit_time or _now_et()
+            entry_price = avg_entry_price or 0
+            pnl = (exit_price - entry_price) * exit_quantity if entry_price > 0 else 0
+            pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            # DB에 SELL 이벤트만 기록 (부모 trades 레코드는 존재한다고 가정)
+            self._enqueue(
+                """UPDATE trades SET
+                   exit_time=$1, exit_price=$2,
+                   exit_quantity=COALESCE(exit_quantity,0)+$3,
+                   exit_reason=$4, exit_type=$5,
+                   pnl=COALESCE(pnl,0)+$6, pnl_pct=$7, updated_at=$8
+                   WHERE id=$9""",
+                (now, exit_price, exit_quantity, exit_reason, exit_type,
+                 round(pnl, 4), round(pnl_pct, 4), now, trade_id),
+            )
+            self._enqueue(
+                """INSERT INTO trade_events
+                   (trade_id, symbol, event_type, event_time, price, quantity,
+                    exit_type, exit_reason, pnl, pnl_pct, kis_order_no, status)
+                   VALUES ($1, (SELECT symbol FROM trades WHERE id=$1),
+                           'SELL', $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+                (trade_id, now, exit_price, exit_quantity,
+                 exit_type, exit_reason, round(pnl, 4), round(pnl_pct, 4),
+                 kis_order_no or "", exit_type),
+            )
             return None
 
         now = exit_time or _now_et()

@@ -21,11 +21,15 @@
 - **DB 스키마**: trades + trade_events (NUMERIC 12,4 USD, idx_us_* 인덱스)
 - **API 확장**: 통계 조회(`/api/us/statistics`), 이벤트 로그(`/api/us/trade-events`)
 
-### 코드 리뷰 반영 (P0 2건 + P1 2건)
+### 코드 리뷰 반영 (P0 2건 + P1 6건)
 - **P0: datetime.now() → ET 시간대**: 모든 timestamp을 `_now_et()` (ET timezone-naive) 사용
 - **P0: exit_type 항상 "unknown"**: `_execute_exit`에서 reason 기반 exit_type 추론 → pending에 저장
-- **P1: sync 새 포지션 trade_id 누락**: `_sync_portfolio`에서 `SYNC_{symbol}_{timestamp}` trade_id 생성
-- **P1: 미사용 변수 제거**: `record_entry`의 `today_str` 제거
+- **P1-1: _refine_exit_type 한국어 패턴 제거**: US ExitManager 영어 reason만 매칭 (stop_loss, trailing_stop, first/second/third_exit, eod_close)
+- **P1-2: record_exit 캐시 미보유 시 DB 직접 기록**: 봇 재시작 후 캐시 미복구 상태에서 매도 체결 시 DB SELL 이벤트 직접 기록 (데이터 유실 방지)
+- **P1-3: sync 새 포지션 trade_id 누락**: `_sync_portfolio`에서 `SYNC_{symbol}_{timestamp}` trade_id 생성
+- **P1-4: __init__.py re-export**: `USTradeStorage`, `TradeRecord` 패키지 수준 임포트 지원
+- **P1-5: _today_trades 일자 전환 리셋**: `_today_date` 추적, 날짜 변경 시 `_today_trades.clear()` 호출
+- **P1-6: asyncpg 타입 힌트**: `pool` 필드에 `Optional[Any]` 타입 + 런타임 임포트 주석 명시
 
 ---
 
