@@ -293,7 +293,11 @@ class KISUSBroker:
 
         data = await self._api_get(url, self._tr_realtime_balance, params)
         if data.get("rt_cd") != "0":
-            logger.error(f"잔고 조회 실패 (TTTS3012R): {data.get('msg1', '')}")
+            # KIS 특성: 포지션 0건일 때 rt_cd="1", msg_cd="" 반환 → 빈 결과 처리
+            if not data.get("msg_cd") and not data.get("msg1"):
+                logger.debug("[TTTS3012R] 포지션 없음 (빈 결과)")
+                return []
+            logger.error(f"잔고 조회 실패 (TTTS3012R): {data.get('msg1', '')} [{data.get('msg_cd','')}]")
             return []
 
         positions = []
@@ -350,7 +354,12 @@ class KISUSBroker:
 
         rt_data = await self._api_get(rt_url, self._tr_realtime_balance, rt_params)
         if rt_data.get("rt_cd") != "0":
-            logger.error(f"잔고 조회 실패 (TTTS3012R): {rt_data.get('msg1', '')}")
+            # KIS 특성: 포지션 0건 / 당일 체결 없을 때 rt_cd="1", msg_cd="" 반환
+            # → 빈 결과로 처리 (error 아님)
+            if not rt_data.get("msg_cd") and not rt_data.get("msg1"):
+                logger.debug("[TTTS3012R] 포지션 없음 (빈 결과)")
+                return {"positions": [], "account": {"available_cash": None, "total_equity": None, "total_pnl": 0.0}}
+            logger.error(f"잔고 조회 실패 (TTTS3012R): {rt_data.get('msg1', '')} [{rt_data.get('msg_cd','')}]")
             return {}
 
         # 포지션 파싱
