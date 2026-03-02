@@ -876,12 +876,13 @@ class LiveEngine:
     # ============================================================
 
     async def _portfolio_sync_loop(self):
-        """KIS 잔고 ↔ 로컬 Portfolio 동기화 (장외 시간 주기 축소)"""
+        """KIS 잔고 ↔ 로컬 Portfolio 동기화 (비정규장 주기 축소)"""
         while self._running:
             try:
-                # 장외 시간: 5분 간격으로 축소 (불필요한 API 호출 방지)
+                # 비정규장: 5분 간격으로 축소 (불필요한 API 호출 방지)
                 session = self.session.get_session()
-                if session == MarketSession.CLOSED:
+                if session in (MarketSession.CLOSED, MarketSession.PRE_MARKET,
+                               MarketSession.AFTER_HOURS):
                     await asyncio.sleep(300)
                     continue
 
