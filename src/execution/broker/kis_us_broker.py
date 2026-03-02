@@ -694,3 +694,193 @@ class KISUSBroker:
                 else:
                     logger.error(f"Hashkey 발급 실패: {e}")
         return None
+
+    # ============================================================
+    # 시세분석 / 스크리닝 API
+    # ============================================================
+
+    async def get_volume_surge(
+        self,
+        exchange: str = "NAS",
+        minutes_ago: int = 5,
+        min_volume: str = "2",
+    ) -> list[dict]:
+        """
+        해외주식 거래량급증 조회 (HHDFS76270000)
+
+        Parameters
+        ----------
+        exchange    : NAS(나스닥), NYS(뉴욕), AMS(아멕스)
+        minutes_ago : 0=1분전, 1=2분전, 2=3분전, 3=5분전, 4=10분전, 5=15분전, 6=20분전
+        min_volume  : 0=전체, 1=1백주이상, 2=1천주이상, 3=1만주이상, 4=10만주이상, 5=100만주이상
+
+        Returns
+        -------
+        list of dict:
+            symbol  : 종목코드
+            name    : 종목명
+            price   : 현재가 (float)
+            change  : 등락율 (float, %)
+            volume  : 거래량 (int)
+            surge_rate: 급증율 (float, %)  ← n_rate
+            exchange: 거래소코드
+        """
+        # 모의투자 미지원
+        if self.config.env != "prod":
+            logger.debug("[거래량급증] 모의투자 미지원 — skip")
+            return []
+
+        url = f"{self.config.base_url}/uapi/overseas-stock/v1/ranking/volume-surge"
+        # minutes_ago → MIXN 변환
+        mixn_map = {1: "0", 2: "1", 3: "2", 5: "3", 10: "4", 15: "5", 20: "6"}
+        mixn = mixn_map.get(minutes_ago, "3")  # 기본 5분전
+
+        params = {
+            "KEYB":     "",
+            "AUTH":     "",
+            "EXCD":     exchange,
+            "MIXN":     mixn,
+            "VOL_RANG": str(min_volume),
+        }
+        try:
+            data = await self._api_get(url, "HHDFS76270000", params)
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"[거래량급증] API 오류: {data.get('msg1', '')} (excd={exchange})"
+                )
+                return []
+
+            rows = data.get("output2", []) or []
+            result = []
+            for r in rows:
+                sym = r.get("symb", "").strip()
+                if not sym:
+                    continue
+                try:
+                    result.append({
+                        "symbol":     sym,
+                        "name":       r.get("knam", "").strip(),
+                        "price":      float(r.get("last", 0) or 0),
+                        "change":     float(r.get("rate", 0) or 0),
+                        "volume":     int(r.get("tvol", 0) or 0),
+                        "surge_rate": float(r.get("n_rate", 0) or 0),
+                        "exchange":   r.get("excd", exchange),
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+            logger.debug(
+                f"[거래량급증] {exchange} {len(result)}종목 (최대급증 "
+                f"{max((r['surge_rate'] for r in result), default=0):.0f}%)"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"[거래량급증] 조회 오류: {e}")
+            return []
+
+    async def get_condition_search(
+        self,
+        exchange: str = "NAS",
+        min_change_pct: float = 1.0,
+        min_volume: int = 500_000,
+        min_price: float = 5.0,
+        max_price: float = 0.0,
+    ) -> list[dict]:
+        """
+        해외주식 조건검색 (HHDFS76410000) — KIS 자체 필터링
+
+        현재가·등락율·거래량 조건 복합 필터.
+        최대 100건 반환 (다음조회 미지원).
+
+        Parameters
+        ----------
+        exchange       : NAS, NYS, AMS
+        min_change_pct : 등락율 최소 (%)
+        min_volume     : 거래량 최소 (주)
+        min_price      : 현재가 최소 (USD)
+        max_price      : 현재가 최대 (USD, 0=제한없음)
+
+        Returns
+        -------
+        list of dict:
+            symbol   : 종목코드
+            name     : 종목명
+            price    : 현재가 (float)
+            change   : 등락율 (float, %)
+            volume   : 거래량 (int)
+            mktcap   : 시가총액 (float, 천 단위)
+            eps      : EPS (float)
+            per      : PER (float)
+            exchange : 거래소코드
+        """
+        url = f"{self.config.base_url}/uapi/overseas-price/v1/quotations/inquire-search"
+
+        # EXCD 변환 (NAS → NAS, NYS → NYS, AMS → AMS)
+        excd_map = {"NASD": "NAS", "NAS": "NAS", "NYSE": "NYS", "NYS": "NYS",
+                    "AMEX": "AMS", "AMS": "AMS"}
+        excd = excd_map.get(exchange.upper(), "NAS")
+
+        params: dict = {
+            "AUTH": "",
+            "EXCD": excd,
+            "KEYB": "",
+        }
+
+        # 등락율 조건
+        if min_change_pct > 0:
+            params["CO_YN_RATE"]  = "1"
+            params["CO_ST_RATE"]  = str(min_change_pct)
+            params["CO_EN_RATE"]  = "100"
+
+        # 현재가 조건
+        if min_price > 0:
+            params["CO_YN_PRICECUR"] = "1"
+            params["CO_ST_PRICECUR"] = str(min_price)
+            if max_price > 0:
+                params["CO_EN_PRICECUR"] = str(max_price)
+
+        # 거래량 조건
+        if min_volume > 0:
+            params["CO_YN_VOLUME"] = "1"
+            params["CO_ST_VOLUME"] = str(min_volume)
+            params["CO_EN_VOLUME"] = "9999999999"
+
+        try:
+            data = await self._api_get(url, "HHDFS76410000", params)
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"[조건검색] API 오류: {data.get('msg1', '')} (excd={excd})"
+                )
+                return []
+
+            rows = data.get("output2", []) or []
+            result = []
+            for r in rows:
+                sym = r.get("symb", "").strip()
+                if not sym:
+                    continue
+                try:
+                    result.append({
+                        "symbol":   sym,
+                        "name":     r.get("name", "").strip() or r.get("ename", "").strip(),
+                        "price":    float(r.get("last", 0) or 0),
+                        "change":   float(r.get("rate", 0) or 0),
+                        "volume":   int(r.get("tvol", 0) or 0),
+                        "mktcap":   float(r.get("valx", 0) or 0),
+                        "eps":      float(r.get("eps", 0) or 0),
+                        "per":      float(r.get("per", 0) or 0),
+                        "exchange": r.get("excd", excd),
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+            logger.info(
+                f"[조건검색] {excd} {len(result)}종목 "
+                f"(등락율≥{min_change_pct}%, 거래량≥{min_volume:,})"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"[조건검색] 조회 오류: {e}")
+            return []

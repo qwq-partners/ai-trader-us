@@ -41,6 +41,7 @@ from .types import (
     StrategyType, TimeHorizon, PositionSide, MarketSession,
 )
 from ..data.feeds.finnhub_ws import FinnhubWSFeed
+from ..data.feeds.kis_ws import KISNotificationWS
 from ..data.providers.earnings_provider import EarningsProvider
 from ..data.providers.finviz_provider import FinvizProvider
 from ..data.providers.news_provider import FinnhubNewsProvider, CompositeNewsProvider
@@ -104,9 +105,26 @@ class LiveEngine:
         self.health_monitor = HealthMonitor(self)
         self.strategies: List[BaseStrategy] = []
 
-        # Finnhub WebSocket 실시간 시세
+        # Finnhub WebSocket 실시간 시세 (디스플레이 전용 — 15분 지연)
         finnhub_key = os.getenv("FINNHUB_API_KEY", "")
         self.ws_feed: Optional[FinnhubWSFeed] = FinnhubWSFeed(finnhub_key) if finnhub_key else None
+
+        # KIS 실시간체결통보 WebSocket (H0GSCNI0) — REST 폴링 보완
+        self.kis_ws: Optional[KISNotificationWS] = None
+        hts_id = os.getenv("KIS_HTS_ID", "") or os.getenv("KIS_APPKEY", "")
+        if hasattr(self.broker, "config") and self.broker.config.env == "prod" and hts_id:
+            from ..execution.broker.kis_us_broker import KISUSConfig
+            cfg: KISUSConfig = self.broker.config
+            self.kis_ws = KISNotificationWS(
+                app_key=cfg.app_key,
+                app_secret=cfg.app_secret,
+                hts_id=hts_id,
+                is_mock=False,
+            )
+
+        # 거래량급증 심볼 캐시 (volume_surge_loop 갱신, 스크리닝 우선 반영)
+        self._vol_surge_symbols: Set[str] = set()
+        self._vol_surge_updated: Optional[datetime] = None
 
         # 테마 탐지기
         self.theme_detector: Optional[USThemeDetector] = (
@@ -212,13 +230,43 @@ class LiveEngine:
             self._last_screen_result = cached
             logger.info(f"[스크리너] 캐시 로드: {len(cached.results)}종목 ({cached.scan_date})")
 
-        # 7. Finnhub WebSocket 초기화
+        # 7. Finnhub WebSocket 초기화 (디스플레이 전용)
         if self.ws_feed:
             self.ws_feed.on_trade(self._on_ws_price)
-            # 보유 종목 구독
             if self.portfolio.positions:
                 await self.ws_feed.subscribe(list(self.portfolio.positions.keys()))
             logger.info(f"Finnhub WS 초기화 완료 (구독 {len(self.portfolio.positions)}개)")
+
+        # 8. KIS 실시간체결통보 WS 콜백 등록
+        if self.kis_ws:
+            self.kis_ws.on_fill(self._on_kis_fill)
+            logger.info("[KIS WS] 실시간체결통보 초기화 완료 (H0GSCNI0)")
+
+        # 9. KIS 조건검색으로 pool seed (장중인 경우에만)
+        if self.session.is_market_open() and hasattr(self.broker, "get_condition_search"):
+            try:
+                surge_symbols: Set[str] = set()
+                for excd in ("NAS", "NYS", "AMS"):
+                    hits = await self.broker.get_condition_search(
+                        exchange=excd,
+                        min_change_pct=1.0,
+                        min_volume=500_000,
+                        min_price=5.0,
+                    )
+                    for h in hits:
+                        sym = h["symbol"]
+                        if sym in self._universe:
+                            surge_symbols.add(sym)
+
+                if surge_symbols:
+                    # 유니버스 맨 앞으로 이동 (즉시 스크리닝 우선순위 ↑)
+                    rest = [s for s in self._universe if s not in surge_symbols]
+                    self._universe = list(surge_symbols) + rest
+                    logger.info(
+                        f"[조건검색] 초기화 pool seed: {len(surge_symbols)}종목 유니버스 앞단 배치"
+                    )
+            except Exception as e:
+                logger.warning(f"[조건검색] 초기화 seed 실패 (무시): {e}")
 
     def _create_broker(self):
         """설정 기반 브로커 생성 팩토리"""
@@ -280,10 +328,22 @@ class LiveEngine:
             asyncio.create_task(self._watchlist_loop(), name="watchlist")
         )
 
-        # Finnhub WS 태스크
+        # Finnhub WS 태스크 (디스플레이 전용)
         if self.ws_feed:
             self._tasks.append(
                 asyncio.create_task(self.ws_feed.start(), name="finnhub_ws")
+            )
+
+        # KIS 실시간체결통보 WS 태스크 (H0GSCNI0)
+        if self.kis_ws:
+            self._tasks.append(
+                asyncio.create_task(self.kis_ws.start(), name="kis_ws")
+            )
+
+        # 거래량급증 루프 (15분 주기, 장중)
+        if hasattr(self.broker, "get_volume_surge"):
+            self._tasks.append(
+                asyncio.create_task(self._volume_surge_loop(), name="vol_surge")
             )
 
         logger.info(f"라이브 엔진 시작 — {len(self._tasks)}개 태스크 실행")
@@ -299,6 +359,7 @@ class LiveEngine:
             "theme_detect": self._theme_detection_loop,
             "screener": self._screener_loop,
             "watchlist": self._watchlist_loop,
+            "vol_surge": self._volume_surge_loop,
         }
         try:
             while self._running:
@@ -328,6 +389,10 @@ class LiveEngine:
         # Finnhub WS 종료
         if self.ws_feed:
             await self.ws_feed.stop()
+
+        # KIS WS 종료
+        if self.kis_ws:
+            await self.kis_ws.stop()
 
         # 태스크 취소
         for task in self._tasks:
@@ -386,9 +451,10 @@ class LiveEngine:
                     except Exception as e:
                         logger.warning(f"[Finviz] 갱신 실패: {e}")
 
-                # Finviz 동적 유니버스 갱신 (1일 1회, daily refresh 후)
+                # Finviz 동적 유니버스 갱신 (1일 1회, daily refresh 후 5초 대기)
                 if self._dynamic_last_refresh != today:
                     try:
+                        await asyncio.sleep(5)  # Rate limit 방지
                         dynamic = await self.finviz_provider.discover_dynamic()
                         self._dynamic_last_refresh = today
                         if dynamic:
@@ -448,6 +514,24 @@ class LiveEngine:
             logger.debug(
                 f"[스크리닝] StockScreener 상위 {len(screen_candidates)}개 후보 사용"
             )
+
+        # ── 거래량급증 종목 최우선 삽입 (HHDFS76270000, 15분 이내 갱신분) ───
+        if self._vol_surge_symbols and self._vol_surge_updated:
+            surge_age = (datetime.now() - self._vol_surge_updated).total_seconds()
+            if surge_age < 1800:  # 30분 이내 데이터만 유효
+                surge_candidates = [
+                    s for s in self._vol_surge_symbols
+                    if s not in held and s not in self._signal_cooldown
+                    and s not in self._pending_symbols
+                ]
+                if surge_candidates:
+                    existing = set(screen_candidates)
+                    new_surge = [s for s in surge_candidates if s not in existing]
+                    screen_candidates = new_surge + screen_candidates
+                    logger.info(
+                        f"[스크리닝] 거래량급증 {len(new_surge)}종목 최우선 삽입 "
+                        f"→ 총 {len(screen_candidates)}개 후보"
+                    )
 
         # Finviz 동적 발견 종목을 후보 상위에 삽입
         if self._dynamic_symbols:
@@ -1713,6 +1797,99 @@ class LiveEngine:
         # 디스플레이 전용: current_price만 갱신 (15분 지연 데이터 — 참고용)
         # highest_price / exit check는 KIS REST 실시간 가격 기준으로만 수행
         pos.current_price = Decimal(str(price))
+
+    # ============================================================
+    # KIS WS 체결통보 콜백 (H0GSCNI0)
+    # ============================================================
+
+    async def _on_kis_fill(
+        self,
+        order_no: str,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        exchange: str,
+    ):
+        """
+        KIS 실시간체결통보 → _on_order_filled 직접 연결.
+
+        REST 폴링(_check_orders)보다 먼저 도달하면 즉시 체결 처리.
+        pending_orders에 없는 체결통보는 무시 (포지션 sync가 처리).
+        """
+        if order_no not in self._pending_orders:
+            logger.debug(
+                f"[KIS WS] 체결통보 수신 (pending 없음, sync에서 처리): "
+                f"{side} {symbol} {qty}주 @ ${price:.2f}"
+            )
+            return
+
+        pending = self._pending_orders[order_no]
+        # REST 폴링과 동일한 fill_info 포맷으로 변환
+        fill_info = {
+            "order_no":    order_no,
+            "symbol":      symbol,
+            "side":        side,
+            "status":      "filled",
+            "filled_qty":  qty,
+            "filled_price": price,
+            "exchange":    exchange,
+        }
+        logger.info(
+            f"[KIS WS] 체결통보 즉시 처리: {side.upper()} {symbol} "
+            f"{qty}주 @ ${price:.2f} (전략: {pending.get('strategy', '')})"
+        )
+        await self._on_order_filled(order_no, fill_info)
+
+    # ============================================================
+    # 거래량급증 루프 (HHDFS76270000)
+    # ============================================================
+
+    async def _volume_surge_loop(self):
+        """
+        KIS 거래량급증 API 15분 주기 조회 → _vol_surge_symbols 갱신.
+
+        surge 종목은 _run_screening에서 우선 평가 대상으로 반영.
+        실전 계좌 전용 (모의투자 미지원).
+        """
+        await asyncio.sleep(60)  # 초기 대기 (브로커 연결 후)
+
+        while self._running:
+            try:
+                if not self.session.is_market_open():
+                    await asyncio.sleep(300)
+                    continue
+
+                new_surge: Set[str] = set()
+                # 나스닥 + 뉴욕 + 아멕스 3거래소 조회
+                for excd in ("NAS", "NYS", "AMS"):
+                    hits = await self.broker.get_volume_surge(
+                        exchange=excd,
+                        minutes_ago=5,
+                        min_volume="2",   # 1천주 이상
+                    )
+                    for h in hits:
+                        sym = h["symbol"]
+                        # 유니버스 필터 + 최소 급증율 10% 이상만
+                        if sym in self._universe and h.get("surge_rate", 0) >= 10:
+                            new_surge.add(sym)
+
+                prev_count = len(self._vol_surge_symbols)
+                self._vol_surge_symbols = new_surge
+                self._vol_surge_updated = datetime.now()
+
+                if new_surge:
+                    logger.info(
+                        f"[거래량급증] {len(new_surge)}종목 감지 "
+                        f"(이전: {prev_count}) — {', '.join(sorted(new_surge)[:10])}"
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[거래량급증] 루프 오류: {e}")
+
+            await asyncio.sleep(900)  # 15분
 
     # ============================================================
     # 헬퍼
