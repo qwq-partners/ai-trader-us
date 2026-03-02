@@ -1,5 +1,32 @@
 # Changelog
 
+## [2026-03-03] KIS API 3종 통합 + 문서화
+
+**추가**:
+- `src/data/feeds/kis_ws.py` — KIS 실시간체결통보 WS (H0GSCNI0)
+  - `/oauth2/Approval` 접속키 자동 발급, 지수 백오프 재연결
+  - CNTG_YN=2 체결통보 → `_on_kis_fill` 즉시 처리 (REST 폴링 보완)
+  - HTS ID 오류 시 자동 비활성화 (잘못된 HTS ID로 무한 재시도 방지)
+- `kis_us_broker.get_volume_surge()` — 거래량급증 API (HHDFS76270000)
+  - NAS/NYS/AMS 3거래소, MIXN·VOL_RANG 파라미터화
+- `kis_us_broker.get_condition_search()` — 조건검색 API (HHDFS76410000)
+  - 등락율/현재가/거래량 복합 필터, 최대 100종목
+- `live_engine._volume_surge_loop()` — 15분 주기 거래량급증 캐시 갱신
+  - `_run_screening()` 최우선 후보 삽입 (30분 이내 데이터, surge_rate≥10%)
+- `live_engine` 초기화 시 조건검색으로 pool seed (장중·등락율≥1%·거래량≥50만)
+- `docs/KIS_OVERSEAS_API.md` — KIS 해외주식 API 50개 완전 레퍼런스 (305KB)
+
+**수정**:
+- KIS_HTS_ID 검증 강화 — 영문+숫자·6자 이상 아니면 WS 자동 비활성화
+- KIS_HTS_ID 폴백으로 KIS_APPKEY 사용 제거 (잘못된 동작)
+- 엔진 shutdown()에 `kis_ws.stop()` 추가
+- restart_map에 `vol_surge` 태스크 추가
+
+**설정**:
+- `.env` KIS_HTS_ID 추가 (KIS 포털 로그인 ID 입력 시 WS 활성화)
+
+---
+
 ## [2026-03-02] Finviz 동적 스크리닝 + Dollar Volume/ATR% 필터 개선
 
 **수정 파일**:

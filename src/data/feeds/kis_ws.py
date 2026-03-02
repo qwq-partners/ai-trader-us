@@ -239,6 +239,13 @@ class KISNotificationWS:
                     logger.info(f"[KIS WS] 구독 확인: {tr_id} — {msg}")
                 else:
                     logger.warning(f"[KIS WS] 응답 오류: {tr_id} rt_cd={rt_cd} {msg}")
+                    # HTS ID 오류 → 연결 중단 (재연결 루프로 복귀하지 않도록 _running=False)
+                    if "htsid" in msg.lower() or rt_cd == "9":
+                        logger.error(
+                            "[KIS WS] HTS ID 오류 — KIS_HTS_ID 환경변수를 KIS 포털 로그인 ID로 설정하세요. "
+                            "WS 비활성화합니다."
+                        )
+                        self._running = False
             except Exception:
                 pass
             return

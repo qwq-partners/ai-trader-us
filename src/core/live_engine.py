@@ -110,9 +110,16 @@ class LiveEngine:
         self.ws_feed: Optional[FinnhubWSFeed] = FinnhubWSFeed(finnhub_key) if finnhub_key else None
 
         # KIS 실시간체결통보 WebSocket (H0GSCNI0) — REST 폴링 보완
+        # KIS_HTS_ID: KIS 포털 로그인 ID (계좌번호와 다름). 미설정 시 WS 비활성화.
         self.kis_ws: Optional[KISNotificationWS] = None
-        hts_id = os.getenv("KIS_HTS_ID", "") or os.getenv("KIS_APPKEY", "")
-        if hasattr(self.broker, "config") and self.broker.config.env == "prod" and hts_id:
+        hts_id = os.getenv("KIS_HTS_ID", "").strip()
+        if (
+            hts_id
+            and hts_id.isalnum()        # 영문+숫자 조합인 HTS ID만 허용
+            and len(hts_id) >= 6        # 최소 길이 보장
+            and hasattr(self.broker, "config")
+            and self.broker.config.env == "prod"
+        ):
             from ..execution.broker.kis_us_broker import KISUSConfig
             cfg: KISUSConfig = self.broker.config
             self.kis_ws = KISNotificationWS(
@@ -120,6 +127,12 @@ class LiveEngine:
                 app_secret=cfg.app_secret,
                 hts_id=hts_id,
                 is_mock=False,
+            )
+            logger.info(f"[KIS WS] HTS ID 설정됨: {hts_id[:4]}****")
+        else:
+            logger.info(
+                "[KIS WS] KIS_HTS_ID 미설정 또는 형식 불일치 — 체결통보 WS 비활성화 "
+                "(KIS 포털 로그인 ID를 KIS_HTS_ID 환경변수로 설정 시 활성화)"
             )
 
         # 거래량급증 심볼 캐시 (volume_surge_loop 갱신, 스크리닝 우선 반영)
