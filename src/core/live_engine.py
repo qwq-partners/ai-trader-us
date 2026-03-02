@@ -843,6 +843,13 @@ class LiveEngine:
                     await asyncio.sleep(300)
                     continue
 
+                # 일일 통계 리셋 (스크리닝 루프보다 먼저 실행될 수 있으므로 여기서도 체크)
+                today = self.session.now_et().date()
+                if self._daily_reset_done != today:
+                    self._daily_reset_done = today
+                    self.portfolio.reset_daily()
+                    logger.info("[동기화] 일일 통계 리셋")
+
                 await self._sync_portfolio()
             except asyncio.CancelledError:
                 break
@@ -1185,29 +1192,43 @@ class LiveEngine:
 
             # 포지션에 전략/시간지평 세팅 (sync에서 생성되면 strategy=None이므로)
             pos = self.portfolio.positions.get(symbol)
-            if pos:
-                pos.trade_id = trade_id
-                pos.strategy = pending.get("strategy", "")
-                # 메모리 캐시에 기록 (재시작 후 sync 복원용)
-                if pos.strategy:
-                    self._symbol_strategy[symbol] = pos.strategy
-                # 섹터 설정 (섹터 다각화 체크용)
-                if symbol in self._sector_cache:
-                    pos.sector = self._sector_cache[symbol]
-                # P1-1a: highest_price 초기화 (트레일링 스탑 활성화)
-                if pos.highest_price is None:
-                    pos.highest_price = pos.current_price
-                # 전략의 time_horizon 찾기
-                for strat in self.strategies:
-                    if strat.strategy_type.value == pos.strategy:
-                        pos.time_horizon = strat.time_horizon
-                        break
+            if not pos:
+                # P0: sync 미실행 시 포지션이 아직 없음 → 직접 생성
+                pos = Position(
+                    symbol=symbol,
+                    name=pending.get("name", ""),
+                    side=PositionSide.LONG,
+                    quantity=filled_qty,
+                    avg_price=Decimal(str(filled_price)),
+                    current_price=Decimal(str(filled_price)),
+                    highest_price=Decimal(str(filled_price)),
+                    entry_time=datetime.now(),
+                )
+                self.portfolio.positions[symbol] = pos
+                logger.info(f"[체결] {symbol} — sync 전 포지션 직접 생성")
+
+            pos.trade_id = trade_id
+            pos.strategy = pending.get("strategy", "")
+            # 메모리 캐시에 기록 (재시작 후 sync 복원용)
+            if pos.strategy:
+                self._symbol_strategy[symbol] = pos.strategy
+            # 섹터 설정 (섹터 다각화 체크용)
+            if symbol in self._sector_cache:
+                pos.sector = self._sector_cache[symbol]
+            # highest_price 초기화 (트레일링 스탑 활성화)
+            if pos.highest_price is None:
+                pos.highest_price = pos.current_price
+            # 전략의 time_horizon 찾기
+            for strat in self.strategies:
+                if strat.strategy_type.value == pos.strategy:
+                    pos.time_horizon = strat.time_horizon
+                    break
 
             # TradeStorage DB + 캐시 기록
             self.trade_storage.record_entry(
                 trade_id=trade_id,
                 symbol=symbol,
-                name=pos.name if pos else "",
+                name=pos.name,
                 entry_price=float(filled_price),
                 entry_quantity=filled_qty,
                 entry_reason=pending.get("reason", ""),

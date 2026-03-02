@@ -114,20 +114,29 @@ class ExitManager:
                         'reason': f'trailing_stop (from high: -{trail_from_high:.1f}%)'}
 
         # --- Partial exits ---
+        # 1주 보유 시 분할매도 불가 → stage 진행 않고 trailing_stop에 위임
+        qty = position.quantity
         if stage < 1 and pnl_pct >= cfg.first_exit_pct:
-            self._exit_stages[symbol] = 1
-            return {'action': 'partial', 'ratio': cfg.first_exit_ratio,
-                    'reason': f'first_exit (+{pnl_pct:.1f}%)'}
+            sell_qty = int(qty * cfg.first_exit_ratio)
+            if sell_qty >= 1:
+                self._exit_stages[symbol] = 1
+                return {'action': 'partial', 'ratio': cfg.first_exit_ratio,
+                        'reason': f'first_exit (+{pnl_pct:.1f}%)'}
+            # 분할매도 불가 → trailing_stop 활성화 대기 (stage 유지)
 
         if stage < 2 and pnl_pct >= cfg.second_exit_pct:
-            self._exit_stages[symbol] = 2
-            return {'action': 'partial', 'ratio': cfg.second_exit_ratio,
-                    'reason': f'second_exit (+{pnl_pct:.1f}%)'}
+            sell_qty = int(qty * cfg.second_exit_ratio)
+            if sell_qty >= 1:
+                self._exit_stages[symbol] = 2
+                return {'action': 'partial', 'ratio': cfg.second_exit_ratio,
+                        'reason': f'second_exit (+{pnl_pct:.1f}%)'}
 
         if stage < 3 and pnl_pct >= cfg.third_exit_pct:
-            self._exit_stages[symbol] = 3
-            return {'action': 'partial', 'ratio': cfg.third_exit_ratio,
-                    'reason': f'third_exit (+{pnl_pct:.1f}%)'}
+            sell_qty = int(qty * cfg.third_exit_ratio)
+            if sell_qty >= 1:
+                self._exit_stages[symbol] = 3
+                return {'action': 'partial', 'ratio': cfg.third_exit_ratio,
+                        'reason': f'third_exit (+{pnl_pct:.1f}%)'}
 
         return None
 

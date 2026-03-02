@@ -1,5 +1,20 @@
 # Changelog
 
+## [2026-03-02] 매매 흐름 분석 — P0 2건 + P1 1건 수정
+
+**수정 파일**:
+- `src/core/live_engine.py` — 매수 체결 pos=None 보호, daily_pnl 리셋 독립화
+- `src/strategies/exit_manager.py` — 1주 분할매도 스킵 방지
+
+### P0 수정 (2건)
+- **매수 체결 pos=None 보호 (P0-1)**: sync 미실행 시 `portfolio.positions`에 포지션이 없어 `trade_id`, `highest_price`, `strategy` 미설정 → 포지션 직접 생성으로 해결
+- **1주 분할매도 영구 스킵 (P0-2)**: `int(1 × 0.40) = 0주`로 매도 스킵되면서 stage가 올라가 재시도 불가 → ExitManager에서 sell_qty 사전 계산, 0주이면 stage 진행 않고 trailing_stop에 위임
+
+### P1 수정 (1건)
+- **daily_pnl 리셋 지연 (P1-1)**: `reset_daily()`가 스크리닝 루프(30분)에서만 호출 → `_portfolio_sync_loop`(30초)에서도 날짜 변경 감지 시 리셋
+
+---
+
 ## [2026-03-02] PostgreSQL TradeStorage 도입 — 듀얼 라이트 거래 저장소
 
 **수정/생성 파일**:
