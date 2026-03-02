@@ -1,5 +1,41 @@
 # Changelog
 
+## [2026-03-02] Finviz 동적 스크리닝 + Dollar Volume/ATR% 필터 개선
+
+**수정 파일**:
+- `src/data/providers/finviz_provider.py` — `discover_dynamic()` 메서드 추가
+- `src/data/screener.py` — Dollar Volume 필터 + ATR% 하한 + scan 루프 예외 핸들링
+- `src/core/live_engine.py` — 동적 유니버스 연동 + 스크리닝 후보 보강
+
+### 변경 내용
+1. **Finviz 동적 유니버스 (보강 방식)**
+   - 3가지 `f=` 필터: 거래량급증+3%상승, 신고가+4주모멘텀, 어닝주간+5%갭
+   - 장 시작 시 1일 1회 실행, 기존 SP500+400에 ~50-70종목 보강
+   - 동적 종목은 `_run_screening` 후보 상위에 우선 삽입
+2. **Dollar Volume 필터**: `min_avg_volume=500K주` → `min_dollar_volume=$5M` 추가 (거래대금 기반)
+3. **ATR% 하한 필터**: `min_atr_pct=2.0%` — 변동성 부족 종목 조기 제외
+4. **scan() 루프 예외 핸들링**: 개별 종목 분석 실패 시 전체 스캔 중단 방지
+5. **코드 리뷰 P1 수정**: 필터 방향 오류(`_u`→`_o`), `_dynamic_last_refresh` 갱신 누락, pending 체크 추가
+
+---
+
+## [2026-03-02] 스크리너 결과 캐시 영속화 — 장 시작 시 즉시 양질 후보 제공
+
+**수정 파일**:
+- `src/data/screener.py` — `save_cache()` / `load_cache()` 메서드 추가
+- `src/core/live_engine.py` — 초기화 시 캐시 로드 + 스크리너 완료 시 캐시 저장
+
+### 변경 내용
+- **문제**: 장 시작 후 첫 시그널까지 ~40분 소요 (screener 10분 + 다음 screening 30분)
+- **해결**: `~/.cache/ai_trader_us/screener_result.json`에 스크리너 결과 영속화
+  - `save_cache()`: 스크리너 완료 시 전체 결과를 JSON 저장 (symbol, score, flags 등)
+  - `load_cache()`: 시작 시 T-0 또는 T-1 캐시만 유효 (2일 이상 경과 시 무시)
+  - `initialize()`에서 캐시 로드 → `_last_screen_result` 즉시 초기화
+  - `_screener_loop()`에서 스캔 완료 후 자동 캐시 저장 (실패 시 경고만)
+- **효과**: 첫 시그널 타이밍 ~40분 → ~5분으로 단축
+
+---
+
 ## [2026-03-02] 매매 흐름 분석 — P0 2건 + P1 1건 수정
 
 **수정 파일**:

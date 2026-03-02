@@ -128,6 +128,8 @@ class LiveEngine:
                                       finviz=self.finviz_provider)
         self._last_screen_result = None
         self._last_screen_time: Optional[datetime] = None
+        self._dynamic_symbols: Set[str] = set()  # Finviz 동적 발견 종목
+        self._dynamic_last_refresh: Optional[date] = None
 
         # 센티멘트 스코어러
         self.news_provider = None
@@ -204,7 +206,13 @@ class LiveEngine:
         except Exception as e:
             logger.warning(f"[TradeStorage] KIS 동기화 실패: {e}")
 
-        # 6. Finnhub WebSocket 초기화
+        # 6. 스크리너 캐시 로드 (장 시작 시 즉시 양질 후보 제공)
+        cached = self.screener.load_cache()
+        if cached:
+            self._last_screen_result = cached
+            logger.info(f"[스크리너] 캐시 로드: {len(cached.results)}종목 ({cached.scan_date})")
+
+        # 7. Finnhub WebSocket 초기화
         if self.ws_feed:
             self.ws_feed.on_trade(self._on_ws_price)
             # 보유 종목 구독
@@ -378,6 +386,24 @@ class LiveEngine:
                     except Exception as e:
                         logger.warning(f"[Finviz] 갱신 실패: {e}")
 
+                # Finviz 동적 유니버스 갱신 (1일 1회, daily refresh 후)
+                if self._dynamic_last_refresh != today:
+                    try:
+                        dynamic = await self.finviz_provider.discover_dynamic()
+                        self._dynamic_last_refresh = today
+                        if dynamic:
+                            new_syms = set(dynamic) - set(self._universe)
+                            self._dynamic_symbols = new_syms
+                            if new_syms:
+                                logger.info(
+                                    f"[Finviz 동적] 신규 {len(new_syms)}종목 보강 "
+                                    f"(기존 유니버스 외)"
+                                )
+                        else:
+                            logger.debug("[Finviz 동적] 오늘 발견 종목 없음")
+                    except Exception as e:
+                        logger.warning(f"[Finviz 동적] 갱신 실패: {e}")
+
                 await self._run_screening()
 
             except asyncio.CancelledError:
@@ -422,6 +448,22 @@ class LiveEngine:
             logger.debug(
                 f"[스크리닝] StockScreener 상위 {len(screen_candidates)}개 후보 사용"
             )
+
+        # Finviz 동적 발견 종목을 후보 상위에 삽입
+        if self._dynamic_symbols:
+            dynamic_candidates = [
+                s for s in self._dynamic_symbols
+                if s not in held and s not in self._signal_cooldown
+                and s not in self._pending_symbols
+            ]
+            if dynamic_candidates:
+                existing = set(screen_candidates)
+                new_dynamic = [s for s in dynamic_candidates if s not in existing]
+                screen_candidates = new_dynamic + screen_candidates
+                logger.debug(
+                    f"[스크리닝] 동적 {len(new_dynamic)}종목 삽입 → "
+                    f"총 {len(screen_candidates)}개 후보"
+                )
 
         if screen_candidates:
             candidates = screen_candidates[:self._max_screen_symbols]
@@ -1639,6 +1681,10 @@ class LiveEngine:
                         logger.info(
                             f"[스크리너] 완료 — {len(result.results)}/{result.total_scanned} 통과"
                         )
+                        try:
+                            self.screener.save_cache(result)
+                        except Exception as e:
+                            logger.warning(f"[스크리너] 캐시 저장 실패: {e}")
                 else:
                     logger.debug("[스크리너] 장 마감 — skip")
             except asyncio.CancelledError:

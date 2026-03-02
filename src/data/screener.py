@@ -8,8 +8,10 @@ Scans universe for trading opportunities based on technical conditions:
 - Earnings approaching
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
@@ -76,11 +78,69 @@ class ScreenerResult:
 class StockScreener:
     """Scan universe for trading opportunities"""
 
+    _CACHE_PATH = Path.home() / ".cache" / "ai_trader_us" / "screener_result.json"
+
     def __init__(self, provider: YFinanceProvider = None,
                  finviz: FinvizProvider = None):
         self._provider = provider or YFinanceProvider()
         self._store = DataStore()
         self._finviz: Optional[FinvizProvider] = finviz
+
+    def save_cache(self, result: ScreenerResult):
+        """스크리너 결과를 JSON 캐시로 저장"""
+        data = {
+            "scan_date": result.scan_date.isoformat(),
+            "total_scanned": result.total_scanned,
+            "saved_at": datetime.now().isoformat(),
+            "results": [
+                {
+                    "symbol": r.symbol, "close": r.close,
+                    "change_1d": r.change_1d, "change_5d": r.change_5d,
+                    "change_20d": r.change_20d,
+                    "volume": r.volume, "avg_volume": r.avg_volume,
+                    "vol_ratio": r.vol_ratio, "rsi": r.rsi,
+                    "pct_from_52w_high": r.pct_from_52w_high,
+                    "atr_pct": r.atr_pct, "score": r.score,
+                    "finviz_bonus": r.finviz_bonus,
+                    "finviz_meta": r.finviz_meta or {},
+                    "flags": r.flags or [],
+                }
+                for r in result.results
+            ],
+        }
+        self._CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False))
+
+    def load_cache(self) -> Optional[ScreenerResult]:
+        """캐시에서 스크리너 결과 로드 (T-0 또는 T-1 유효)"""
+        if not self._CACHE_PATH.exists():
+            return None
+        try:
+            data = json.loads(self._CACHE_PATH.read_text())
+            scan_date = date.fromisoformat(data["scan_date"])
+            from zoneinfo import ZoneInfo
+            today = datetime.now(ZoneInfo("America/New_York")).date()
+            if (today - scan_date).days > 1:
+                return None
+            results = [
+                ScreenResult(
+                    symbol=r["symbol"], close=r["close"],
+                    change_1d=r["change_1d"], change_5d=r["change_5d"],
+                    change_20d=r["change_20d"],
+                    volume=r["volume"], avg_volume=r["avg_volume"],
+                    vol_ratio=r["vol_ratio"], rsi=r["rsi"],
+                    pct_from_52w_high=r["pct_from_52w_high"],
+                    atr_pct=r["atr_pct"], score=r["score"],
+                    finviz_bonus=r.get("finviz_bonus", 0),
+                    finviz_meta=r.get("finviz_meta", {}),
+                    flags=r.get("flags", []),
+                )
+                for r in data["results"]
+            ]
+            return ScreenerResult(results=results, scan_date=scan_date,
+                                  total_scanned=data["total_scanned"])
+        except Exception:
+            return None
 
     def set_finviz(self, finviz: FinvizProvider):
         """Finviz 프로바이더 주입 (live_engine에서 호출)"""
@@ -93,6 +153,8 @@ class StockScreener:
         min_avg_volume: int = 500_000,
         vol_surge_threshold: float = 2.0,
         lookback_days: int = 252,
+        min_dollar_volume: float = 5_000_000,
+        min_atr_pct: float = 2.0,
     ) -> ScreenerResult:
         """
         Scan symbols and compute screening metrics.
@@ -115,12 +177,15 @@ class StockScreener:
             if (i + 1) % 50 == 0:
                 logger.info(f"  Scanning {i+1}/{len(symbols)}...")
 
-            result = self._analyze_symbol(
-                symbol, start, today, min_price, min_avg_volume,
-                vol_surge_threshold,
-            )
-            if result:
-                screener_result.results.append(result)
+            try:
+                result = self._analyze_symbol(
+                    symbol, start, today, min_price, min_avg_volume,
+                    vol_surge_threshold, min_dollar_volume, min_atr_pct,
+                )
+                if result:
+                    screener_result.results.append(result)
+            except Exception as e:
+                logger.debug(f"[스크리너] {symbol} 분석 실패: {e}")
 
         # Finviz 보너스 적용 (FinvizProvider가 준비된 경우)
         if self._finviz and self._finviz.is_ready:
@@ -158,6 +223,8 @@ class StockScreener:
         min_price: float,
         min_avg_volume: int,
         vol_surge_threshold: float,
+        min_dollar_volume: float = 5_000_000,
+        min_atr_pct: float = 2.0,
     ) -> Optional[ScreenResult]:
         """Analyze single symbol"""
         # Load data
@@ -178,9 +245,12 @@ class StockScreener:
         if close < min_price:
             return None
 
-        # Volume filter
+        # Volume filter (shares + dollar volume)
         avg_vol_20 = int(df['volume'].tail(20).mean())
         if avg_vol_20 < min_avg_volume:
+            return None
+        avg_dollar_vol = float((df['volume'] * df['close']).tail(20).mean())
+        if avg_dollar_vol < min_dollar_volume:
             return None
 
         # Compute metrics
@@ -216,6 +286,10 @@ class StockScreener:
         ], axis=1).max(axis=1)
         atr = float(tr.mean())
         atr_pct = (atr / close * 100) if close > 0 else 0
+
+        # ATR% 하한 필터 (변동성 부족 종목 제외)
+        if atr_pct < min_atr_pct:
+            return None
 
         # 20-day high breakout
         prev_high_20d = float(df['high'].iloc[-21:-1].max()) if len(df) >= 21 else 0

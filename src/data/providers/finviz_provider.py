@@ -235,6 +235,49 @@ class FinvizProvider:
         logger.warning("[Finviz] 갱신 실패 — 빈 응답")
         return False
 
+    async def discover_dynamic(self) -> List[str]:
+        """
+        Finviz f= 필터로 오늘의 핫 종목 동적 발견.
+
+        3가지 필터 셋:
+          A. 거래량 급증 + 상승: 장중 핫 종목
+          B. 신고가 근접 + 4주 모멘텀: SEPA/추세 후보
+          C. 어닝 주간 + 큰 갭: EarningsDrift 후보
+
+        Returns:
+            중복 제거된 티커 리스트 (기존 유니버스에 추가용)
+        """
+        if not self._token:
+            return []
+
+        filters = [
+            # A: 거래량 급증 + 3% 이상 상승 (프리마켓/장중 핫 종목)
+            "sh_avgvol_o500,sh_price_o10,ta_relvol_o2,ta_change_o3",
+            # B: 신고가 근접 + 4주 모멘텀 (추세 추종 후보)
+            "sh_avgvol_o500,sh_price_o10,ta_highlow52w_nh,ta_perf4w_o10",
+            # C: 어닝 주간 + 5% 이상 갭 (EarningsDrift 후보)
+            "sh_avgvol_o500,sh_price_o10,ta_change_o5,earningsdate_thisweek",
+        ]
+        filter_names = ["거래량급증", "신고가모멘텀", "어닝갭"]
+
+        discovered: set = set()
+        for f_str, f_name in zip(filters, filter_names):
+            try:
+                rows = await self._fetch_rows("1,65", filter_str=f_str)
+                syms = {
+                    row.get("Ticker", "").strip()
+                    for row in rows
+                    if row.get("Ticker", "").strip()
+                }
+                discovered |= syms
+                logger.info(f"[Finviz 동적] {f_name}: {len(syms)}종목")
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"[Finviz 동적] {f_name} 실패: {e}")
+
+        logger.info(f"[Finviz 동적] 총 {len(discovered)}종목 발견 (중복 제거)")
+        return sorted(discovered)
+
     # ── 장중 실시간 스캔 ──────────────────────────────────────────────────────
 
     async def get_intraday_scan(self, symbols: List[str]) -> Dict[str, dict]:
