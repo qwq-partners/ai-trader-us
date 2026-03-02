@@ -63,6 +63,7 @@ from ..strategies.earnings_drift import EarningsDriftStrategy
 from ..monitoring.health_monitor import HealthMonitor
 from ..utils.session import USSession
 from ..utils.telegram import get_notifier
+from ..data.storage.trade_storage import USTradeStorage
 from ..utils.trade_journal import TradeJournal
 
 
@@ -98,7 +99,8 @@ class LiveEngine:
             provider=self.data_provider,
             config=config.raw.get("universe", {}),
         )
-        self.journal = TradeJournal()
+        self.trade_storage = USTradeStorage()
+        self.journal = self.trade_storage._journal  # CSV 호환 유지
         self.health_monitor = HealthMonitor(self)
         self.strategies: List[BaseStrategy] = []
 
@@ -195,7 +197,14 @@ class LiveEngine:
             f"equity=${self.portfolio.total_equity:.2f}"
         )
 
-        # 5. Finnhub WebSocket 초기화
+        # 5. TradeStorage DB 연결
+        await self.trade_storage.connect()
+        try:
+            await self.trade_storage.sync_from_kis(self.broker, engine=self)
+        except Exception as e:
+            logger.warning(f"[TradeStorage] KIS 동기화 실패: {e}")
+
+        # 6. Finnhub WebSocket 초기화
         if self.ws_feed:
             self.ws_feed.on_trade(self._on_ws_price)
             # 보유 종목 구독
@@ -316,6 +325,9 @@ class LiveEngine:
         for task in self._tasks:
             if not task.done():
                 task.cancel()
+
+        # TradeStorage DB 연결 해제
+        await self.trade_storage.disconnect()
 
         # 브로커 연결 해제
         await self.broker.disconnect()
@@ -767,6 +779,25 @@ class LiveEngine:
                 order_no = f"local-{uuid.uuid4().hex[:12]}"
                 logger.warning(f"[매도 주문] {symbol} — KIS 주문번호 미반환, 폴백 사용: {order_no}")
 
+            # exit_type 추론: reason 문자열에서 추출
+            exit_type = "unknown"
+            if reason:
+                rl = reason.lower()
+                if "stop_loss" in rl:
+                    exit_type = "stop_loss"
+                elif "trailing" in rl:
+                    exit_type = "trailing"
+                elif "first_exit" in rl:
+                    exit_type = "first_take_profit"
+                elif "second_exit" in rl:
+                    exit_type = "second_take_profit"
+                elif "third_exit" in rl:
+                    exit_type = "third_take_profit"
+                elif "eod" in rl:
+                    exit_type = "eod_close"
+                elif "breakeven" in rl:
+                    exit_type = "breakeven"
+
             self._pending_orders[order_no] = {
                 "symbol": symbol,
                 "side": "sell",
@@ -774,6 +805,7 @@ class LiveEngine:
                 "price": float(position.current_price),
                 "strategy": position.strategy or "",
                 "reason": reason,
+                "exit_type": exit_type,
                 "exchange": exchange,
                 "submitted_at": datetime.now(),
             }
@@ -916,6 +948,7 @@ class LiveEngine:
                 cached_hp = hp_cache.get(symbol, 0.0)
                 cur_price = float(kp["current_price"])
                 restored_hp = max(cached_hp, cur_price)  # 캐시·현재가 중 큰 값
+                sync_trade_id = f"SYNC_{symbol}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 self.portfolio.positions[symbol] = Position(
                     symbol=symbol,
                     name=kp.get("name", ""),
@@ -925,6 +958,7 @@ class LiveEngine:
                     current_price=Decimal(str(cur_price)),
                     highest_price=Decimal(str(restored_hp)),
                     entry_time=datetime.now(),
+                    trade_id=sync_trade_id,
                 )
                 # 전략 복원 (메모리 캐시에서)
                 if symbol in self._symbol_strategy:
@@ -979,6 +1013,18 @@ class LiveEngine:
                     reason="sync_closed",
                 )
                 self.journal.record_trade(trade)
+
+                # TradeStorage DB 기록
+                trade_id = getattr(pos, 'trade_id', None)
+                if trade_id:
+                    self.trade_storage.record_exit(
+                        trade_id=trade_id,
+                        exit_price=float(pos.current_price),
+                        exit_quantity=pos.quantity,
+                        exit_reason="sync_closed",
+                        exit_type="sync_closed",
+                        avg_entry_price=float(pos.avg_price),
+                    )
 
                 # P0-1c: daily_pnl 갱신
                 self.portfolio.daily_pnl += trade.pnl
@@ -1134,9 +1180,13 @@ class LiveEngine:
                 f"[체결] 매수 {symbol} {filled_qty}주 @ ${filled_price:.2f} "
                 f"(전략: {pending.get('strategy', '')})"
             )
+            # trade_id 생성 + TradeStorage 기록
+            trade_id = f"{symbol}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+
             # 포지션에 전략/시간지평 세팅 (sync에서 생성되면 strategy=None이므로)
             pos = self.portfolio.positions.get(symbol)
             if pos:
+                pos.trade_id = trade_id
                 pos.strategy = pending.get("strategy", "")
                 # 메모리 캐시에 기록 (재시작 후 sync 복원용)
                 if pos.strategy:
@@ -1152,6 +1202,21 @@ class LiveEngine:
                     if strat.strategy_type.value == pos.strategy:
                         pos.time_horizon = strat.time_horizon
                         break
+
+            # TradeStorage DB + 캐시 기록
+            self.trade_storage.record_entry(
+                trade_id=trade_id,
+                symbol=symbol,
+                name=pos.name if pos else "",
+                entry_price=float(filled_price),
+                entry_quantity=filled_qty,
+                entry_reason=pending.get("reason", ""),
+                entry_strategy=pending.get("strategy", ""),
+                signal_score=pending.get("signal_score", 0),
+                exchange=self._exchange_cache.get(symbol, self._default_exchange),
+                kis_order_no=order_no,
+                indicators=self._indicator_cache.get(symbol),
+            )
 
             # Finnhub WS 구독 추가
             if self.ws_feed:
@@ -1196,6 +1261,20 @@ class LiveEngine:
                 )
                 self.journal.record_trade(trade)
                 self.risk_manager.record_trade_result(trade.is_win)
+
+                # TradeStorage DB 기록
+                trade_id = getattr(pos, 'trade_id', None)
+                if trade_id:
+                    self.trade_storage.record_exit(
+                        trade_id=trade_id,
+                        exit_price=float(filled_price),
+                        exit_quantity=filled_qty,
+                        exit_reason=pending.get("reason", ""),
+                        exit_type=pending.get("exit_type", "unknown"),
+                        exit_time=datetime.now(),
+                        avg_entry_price=float(pos.avg_price),
+                        kis_order_no=order_no,
+                    )
 
                 # P0-1a: daily_pnl 갱신
                 self.portfolio.daily_pnl += trade.pnl

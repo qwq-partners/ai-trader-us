@@ -196,6 +196,7 @@ class Position:
     entry_time: Optional[datetime] = None
     sector: Optional[str] = None
     time_horizon: Optional[TimeHorizon] = None
+    trade_id: Optional[str] = None
 
     @property
     def market_value(self) -> Decimal:

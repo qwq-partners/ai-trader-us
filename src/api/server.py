@@ -54,6 +54,9 @@ class APIServer:
         app.router.add_get("/api/us/trades", self._handle_trades)
         app.router.add_get("/api/us/themes", self._handle_themes)
         app.router.add_get("/api/us/screening", self._handle_screening)
+        app.router.add_get("/api/us/risk", self._handle_risk)
+        app.router.add_get("/api/us/statistics", self._handle_statistics)
+        app.router.add_get("/api/us/trade-events", self._handle_trade_events)
         return app
 
     # ------------------------------------------------------------------
@@ -136,6 +139,7 @@ class APIServer:
     async def _handle_positions(self, request: web.Request) -> web.Response:
         positions = []
         for symbol, pos in self.engine.portfolio.positions.items():
+            entry_time = getattr(pos, "entry_time", None)
             positions.append({
                 "symbol": symbol,
                 "name": getattr(pos, "name", ""),
@@ -147,6 +151,7 @@ class APIServer:
                 "strategy": pos.strategy or "",
                 "stage": getattr(pos, "stage", ""),
                 "market_value": float(pos.market_value),
+                "entry_time": entry_time.isoformat() if entry_time else None,
             })
         return web.json_response(positions)
 
@@ -169,7 +174,34 @@ class APIServer:
         return web.json_response(orders)
 
     async def _handle_trades(self, request: web.Request) -> web.Response:
-        """TradeJournal CSV에서 거래 내역 반환"""
+        """거래 내역 반환 (DB 우선, CSV 폴백)"""
+        # DB 사용 가능 시 TradeStorage에서 조회
+        ts = getattr(self.engine, 'trade_storage', None)
+        if ts and ts._db_available:
+            days = int(request.rel_url.query.get("days", "30"))
+            closed = ts.get_closed_trades(days=days)
+            trades = []
+            for t in closed:
+                trades.append({
+                    "timestamp": t.exit_time.isoformat() if t.exit_time else "",
+                    "symbol": t.symbol,
+                    "side": "sell",
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "quantity": t.entry_quantity,
+                    "pnl": round(t.pnl, 2),
+                    "pnl_pct": round(t.pnl_pct, 2),
+                    "strategy": t.entry_strategy,
+                    "reason": t.exit_reason,
+                    "exit_type": t.exit_type,
+                    "holding_minutes": t.holding_minutes,
+                    "trade_id": t.id,
+                    "market": "US",
+                })
+            trades.sort(key=lambda x: x["timestamp"], reverse=True)
+            return web.json_response(trades[:200])
+
+        # CSV 폴백
         date_str = request.rel_url.query.get("date", "")
         journal_path = Path(__file__).parent.parent.parent / "data" / "journal" / "trades.csv"
         trades: list[dict] = []
@@ -201,6 +233,66 @@ class APIServer:
         if not detector:
             return web.json_response([])
         return web.json_response(detector.to_dict_list())
+
+    async def _handle_risk(self, request: web.Request) -> web.Response:
+        """US 리스크 정보"""
+        engine = self.engine
+        rm = engine.risk_manager
+        metrics = rm.get_risk_metrics(engine.portfolio)
+
+        # WS 구독 수
+        ws_sub = 0
+        ws_feed = getattr(engine, "ws_feed", None)
+        if ws_feed:
+            ws_sub = len(getattr(ws_feed, "_subscribed", set()))
+
+        # 신호 생성 수
+        signals_count = len(getattr(engine, "recent_signals", []))
+
+        return web.json_response({
+            "can_trade": metrics.can_trade,
+            "daily_loss_pct": round(metrics.daily_loss_pct, 2),
+            "daily_loss_limit_pct": rm._config.daily_max_loss_pct,
+            "daily_trades": metrics.daily_trades,
+            "daily_max_trades": 999,
+            "position_count": len(engine.portfolio.positions),
+            "max_positions": rm._config.max_positions,
+            "consecutive_losses": metrics.consecutive_losses,
+            "signals_generated": signals_count,
+            "ws_subscribed": ws_sub,
+        })
+
+    async def _handle_statistics(self, request: web.Request) -> web.Response:
+        """거래 통계 (DB 우선, 캐시 폴백)"""
+        days = int(request.rel_url.query.get("days", "30"))
+        ts = getattr(self.engine, 'trade_storage', None)
+        if ts and ts._db_available:
+            stats = await ts.get_statistics_from_db(days=days)
+        elif ts:
+            stats = ts.get_statistics(days=days)
+        else:
+            stats = self.engine.journal.get_summary()
+        return web.json_response(stats)
+
+    async def _handle_trade_events(self, request: web.Request) -> web.Response:
+        """거래 이벤트 로그 (분할매도 추적)"""
+        ts = getattr(self.engine, 'trade_storage', None)
+        if not ts:
+            return web.json_response([])
+        date_str = request.rel_url.query.get("date", "")
+        event_type = request.rel_url.query.get("type", "all")
+        target_date = None
+        if date_str:
+            try:
+                from datetime import date as date_type
+                parts = date_str.split("-")
+                target_date = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
+            except (ValueError, IndexError):
+                pass
+        events = await ts.get_trade_events(
+            target_date=target_date, event_type=event_type
+        )
+        return web.json_response(events)
 
     async def _handle_screening(self, request: web.Request) -> web.Response:
         """스크리너 결과 반환 (상위 50개)"""
