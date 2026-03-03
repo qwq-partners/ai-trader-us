@@ -976,10 +976,12 @@ class LiveEngine:
         """KIS 잔고 ↔ 로컬 Portfolio 동기화 (비정규장 주기 축소)"""
         while self._running:
             try:
-                # 비정규장: 5분 간격으로 축소 (불필요한 API 호출 방지)
                 session = self.session.get_session()
                 if session in (MarketSession.CLOSED, MarketSession.PRE_MARKET,
                                MarketSession.AFTER_HOURS):
+                    # 비정규장: 5분 간격으로 동기화 (완전 스킵 금지)
+                    # 이유: 초기화 시 API 실패로 포지션 0이 되면 장 열릴 때까지 복구 불가
+                    await self._sync_portfolio()
                     await asyncio.sleep(300)
                     continue
 
