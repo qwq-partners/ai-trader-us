@@ -148,7 +148,10 @@ class KISUSBroker:
         try:
             if not self._session or self._session.closed:
                 timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
-                self._session = aiohttp.ClientSession(timeout=timeout)
+                # keepalive_timeout=30: 30초 유휴 시 TCP 연결 만료
+                # KIS 서버가 유휴 커넥션을 닫아 HTTP 500을 반환하는 문제 방지
+                connector = aiohttp.TCPConnector(keepalive_timeout=30, enable_cleanup_closed=True)
+                self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
             if not await self._ensure_token():
                 logger.error("KIS 토큰 발급 실패")
@@ -639,8 +642,19 @@ class KISUSBroker:
             if not await self._ensure_token():
                 return {"rt_cd": "-1", "msg1": "토큰 발급 실패"}
 
+        _reconnect_after = False  # 루프 바깥에서 세션 재생성 플래그
         for attempt in range(3):
             try:
+                # 이전 시도에서 500 발생 → 세션 재생성 후 재시도
+                if _reconnect_after:
+                    _reconnect_after = False
+                    try:
+                        await self._session.close()
+                    except Exception:
+                        pass
+                    self._session = None
+                    await self.connect()
+
                 await self._rate_limit()
                 headers = self._get_headers(tr_id)
                 async with self._session.get(url, headers=headers, params=params) as resp:
@@ -651,6 +665,8 @@ class KISUSBroker:
                     if resp.status in (429, 500, 502, 503) and attempt < 2:
                         wait = 2 ** attempt
                         logger.warning(f"[API] HTTP {resp.status}, {attempt+1}회 재시도 ({wait}초 대기)")
+                        if resp.status == 500:
+                            _reconnect_after = True  # async with 밖에서 세션 재생성
                         await asyncio.sleep(wait)
                         continue
                     try:
