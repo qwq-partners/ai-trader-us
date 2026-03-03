@@ -154,8 +154,12 @@ class KISUSBroker:
                 self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
             if not await self._ensure_token():
-                logger.error("KIS 토큰 발급 실패")
-                return False
+                # 60초 대기 후 1회 더 시도 (KR 엔진 캐시 토큰 대기)
+                logger.warning("[토큰] 발급 실패, 60초 대기 후 캐시 토큰 재확인...")
+                await asyncio.sleep(60)
+                if not await self._ensure_token():
+                    logger.error("KIS 토큰 발급 실패")
+                    return False
 
             logger.info("KIS US 브로커 연결 완료")
             return True
@@ -361,11 +365,11 @@ class KISUSBroker:
             f"msg1={repr(rt_data.get('msg1',''))[:60]} output1_len={len(rt_data.get('output1') or [])}"
         )
         if rt_data.get("rt_cd") != "0":
-            # KIS 특성: 포지션 0건 / 당일 체결 없을 때 rt_cd="1", msg_cd="" 반환
-            # → 빈 결과로 처리 (error 아님)
+            # KIS 특성: 포지션 0건 / 장 마감 후 rt_cd="1", msg_cd="" 반환
+            # → CTRP6504R(체결기준잔고)로 폴백 시도
             if not rt_data.get("msg_cd") and not rt_data.get("msg1"):
-                logger.debug("[TTTS3012R] 포지션 없음 (빈 결과)")
-                return {"positions": [], "account": {"available_cash": None, "total_equity": None, "total_pnl": 0.0}}
+                logger.info("[TTTS3012R] rt_cd=1 빈 응답 → CTRP6504R 폴백 시도")
+                return await self._get_balance_settle()
             logger.error(f"잔고 조회 실패 (TTTS3012R): {rt_data.get('msg1', '')} [{rt_data.get('msg_cd','')}]")
             return {}
 
@@ -433,6 +437,61 @@ class KISUSBroker:
             "total_pnl":      total_pnl,
         }
 
+        return {"positions": positions, "account": account}
+
+    async def _get_balance_settle(self) -> dict:
+        """CTRP6504R 체결기준잔고 폴백 (TTTS3012R 실패 시)"""
+        url = f"{self.config.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        params = {
+            "CANO":              self.config.account_no,
+            "ACNT_PRDT_CD":      self.config.account_product_cd,
+            "WCRC_FRCR_DVSN_CD": "02",
+            "NATN_CD":           "840",
+            "TR_MKET_CD":        "00",
+            "INQR_DVSN_CD":      "00",
+        }
+
+        data = await self._api_get(url, self._tr_balance, params)
+        if data.get("rt_cd") != "0":
+            logger.warning(f"[CTRP6504R] 폴백도 실패: {data.get('msg1', '')}")
+            return {"positions": [], "account": {}}
+
+        # output2: 종목별 잔고
+        positions = []
+        for item in data.get("output2", []):
+            qty_raw = item.get("CCLD_QTY_SMTL", "0") or "0"
+            try:
+                qty = float(qty_raw)
+            except (ValueError, TypeError):
+                qty = 0.0
+            if qty <= 0:
+                continue
+            avg_price = float(item.get("PCH_AMT", "0") or "0")
+            if qty > 0 and avg_price > 0:
+                avg_price = avg_price / qty
+            positions.append({
+                "symbol":        item.get("OVRS_PDNO", "").strip(),
+                "name":          item.get("OVRS_ITEM_NAME", "").strip(),
+                "qty":           qty,
+                "avg_price":     avg_price,
+                "current_price": float(item.get("NOW_PRIC2", "0") or "0"),
+                "pnl":           float(item.get("FRCR_EVLU_PFLS_AMT", "0") or "0"),
+                "pnl_pct":       float(item.get("EVLU_PFLS_RT", "0") or "0"),
+                "exchange":      item.get("OVRS_EXCG_CD", "NASD"),
+            })
+
+        # output3: 계좌 요약
+        output3 = data.get("output3", {})
+        if isinstance(output3, list):
+            output3 = output3[0] if output3 else {}
+
+        account = {
+            "available_cash": float(output3.get("FRCR_DRWG_PSBL_AMT_1", "0") or "0"),
+            "total_equity":   float(output3.get("FRCR_DNCL_AMT_2", "0") or "0"),
+            "total_pnl":      float(output3.get("OVRS_TOT_PFLS", "0") or "0"),
+        }
+
+        logger.info(f"[CTRP6504R] 폴백 성공: {len(positions)}종목, cash={account['available_cash']:.2f}")
         return {"positions": positions, "account": account}
 
     async def get_account(self) -> dict:

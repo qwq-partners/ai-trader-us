@@ -91,15 +91,28 @@ class KISTokenManager:
             if self._is_token_valid():
                 return self._access_token
 
-            # 캐시 파일 리로드 (KR 엔진이 발급한 토큰 반영)
+            # 1. 캐시 파일 리로드 (KR 엔진이 발급한 토큰 반영)
             self._load_cached_token()
             if self._is_token_valid():
                 logger.info("[TokenManager] 캐시 토큰 리로드 성공 (KR 엔진 발급)")
                 return self._access_token
 
-            # 캐시에도 없으면 직접 발급 (최후 수단)
+            # 2. 직접 발급 시도 (최후 수단)
             success = await self._issue_access_token()
-            return self._access_token if success else None
+            if success:
+                return self._access_token
+
+            # 3. 발급 실패 시 60초 대기 후 캐시 리로드 재시도
+            #    (KR 엔진이 그 사이에 발급했을 수 있음)
+            logger.warning("[TokenManager] 발급 실패, 60초 대기 후 캐시 재확인...")
+            await asyncio.sleep(60)
+            self._load_cached_token()
+            if self._is_token_valid():
+                logger.info("[TokenManager] 대기 후 캐시 토큰 확보 성공")
+                return self._access_token
+
+            logger.error("[TokenManager] 토큰 확보 최종 실패")
+            return None
 
     async def refresh(self) -> bool:
         """토큰 강제 갱신 (캐시 리로드 우선)"""

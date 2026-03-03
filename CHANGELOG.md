@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026-03-03] systemd + 토큰 공유 안정화 + 잔고 폴백 수정
+
+**수정 (중요)**:
+- `ai-trader-us.service`: ExecStop 복원 (`-/bin/kill -SIGTERM $MAINPID`), MemoryMax 512M→1G, RestartSec 30→90초
+  - ExecStop `-` 접두사: 프로세스 이미 종료 시 kill 에러 무시
+  - RestartSec 90초: KIS 토큰 rate limit(1분) + 여유 30초, 재시작 루프 방지
+- `kis_auth.py:get_access_token()`: 발급 실패 시 60초 대기 후 캐시 리로드 재시도
+  - KR 엔진이 발급한 토큰을 대기 후 캐시에서 수령하는 패턴
+- `kis_us_broker.py:connect()`: _ensure_token 실패 시 60초 대기 후 1회 더 재시도
+  - RuntimeError 방지 → return False로 안전한 실패 처리
+- `kis_us_broker.py:_get_balance_settle()`: 신규 메서드 추가
+  - TTTS3012R 빈 응답 시 CTRP6504R 폴백 (기존 AttributeError 크래시 수정)
+
 ## [2026-03-03] 잔고조회 API 교체 (CTRP6504R → TTTS3012R) + KIS API 3종 통합
 
 **수정 (중요)**:
