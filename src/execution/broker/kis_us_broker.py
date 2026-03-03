@@ -356,6 +356,10 @@ class KISUSBroker:
         }
 
         rt_data = await self._api_get(rt_url, self._tr_realtime_balance, rt_params)
+        logger.info(
+            f"[TTTS3012R] rt_cd={rt_data.get('rt_cd')} msg_cd={repr(rt_data.get('msg_cd',''))} "
+            f"msg1={repr(rt_data.get('msg1',''))[:60]} output1_len={len(rt_data.get('output1') or [])}"
+        )
         if rt_data.get("rt_cd") != "0":
             # KIS 특성: 포지션 0건 / 당일 체결 없을 때 rt_cd="1", msg_cd="" 반환
             # → 빈 결과로 처리 (error 아님)
@@ -368,7 +372,12 @@ class KISUSBroker:
         # 포지션 파싱
         positions = []
         for item in rt_data.get("output1", []):
-            qty = int(item.get("ovrs_cblc_qty", "0") or "0")
+            # 소수점 주식(fractional) 지원: "0.014619"처럼 소수점 포함 가능
+            qty_raw = item.get("ovrs_cblc_qty", "0") or "0"
+            try:
+                qty = float(qty_raw)
+            except (ValueError, TypeError):
+                qty = 0.0
             if qty <= 0:
                 continue
             avg_price     = float(item.get("pchs_avg_pric", "0") or "0")
