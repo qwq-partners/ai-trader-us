@@ -86,17 +86,28 @@ class KISTokenManager:
     # ============================================================
 
     async def get_access_token(self) -> Optional[str]:
-        """REST API용 Access Token 반환 (자동 갱신)"""
+        """REST API용 Access Token 반환 (캐시 우선, 발급은 최후 수단)"""
         async with self._get_lock():
             if self._is_token_valid():
                 return self._access_token
 
+            # 캐시 파일 리로드 (KR 엔진이 발급한 토큰 반영)
+            self._load_cached_token()
+            if self._is_token_valid():
+                logger.info("[TokenManager] 캐시 토큰 리로드 성공 (KR 엔진 발급)")
+                return self._access_token
+
+            # 캐시에도 없으면 직접 발급 (최후 수단)
             success = await self._issue_access_token()
             return self._access_token if success else None
 
     async def refresh(self) -> bool:
-        """토큰 강제 갱신"""
+        """토큰 강제 갱신 (캐시 리로드 우선)"""
         async with self._get_lock():
+            self._load_cached_token()
+            if self._is_token_valid():
+                logger.info("[TokenManager] 캐시 토큰 리로드 성공")
+                return True
             return await self._issue_access_token()
 
     def invalidate(self):
@@ -170,10 +181,12 @@ class KISTokenManager:
                 expires_in = int(data.get("expires_in", 86400))
                 self._token_expires_at = datetime.now() + timedelta(seconds=expires_in)
 
-                await self._save_token_cache()
+                # 주의: 토큰 캐시 저장하지 않음 — KR 엔진과 appkey 공유 시
+                # US가 캐시를 덮어쓰면 KR 토큰이 무효화됨
+                # await self._save_token_cache()
 
-                logger.info(
-                    f"[TokenManager] Access Token 발급 완료 "
+                logger.warning(
+                    f"[TokenManager] Access Token 직접 발급 (KR 토큰 무효화 주의!) "
                     f"(만료: {self._token_expires_at.strftime('%Y-%m-%d %H:%M:%S')})"
                 )
                 return True
