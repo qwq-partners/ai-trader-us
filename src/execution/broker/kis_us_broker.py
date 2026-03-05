@@ -454,7 +454,7 @@ class KISUSBroker:
         data = await self._api_get(url, self._tr_balance, params)
         if data.get("rt_cd") != "0":
             logger.warning(f"[CTRP6504R] 폴백도 실패: {data.get('msg1', '')}")
-            return {"positions": [], "account": {}}
+            return {}  # 빈 dict → _sync_portfolio에서 'not balance'로 스킵
 
         # output2: 종목별 잔고
         positions = []
@@ -684,6 +684,7 @@ class KISUSBroker:
             "appkey": self.config.app_key,
             "appsecret": self.config.app_secret,
             "tr_id": tr_id,
+            "custtype": "P",
         }
 
     def _is_token_error(self, data: dict) -> bool:

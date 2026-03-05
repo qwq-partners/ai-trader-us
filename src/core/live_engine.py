@@ -1136,6 +1136,14 @@ class LiveEngine:
         # HealthMonitor용 sync 성공 타임스탬프
         self._last_sync_success = time.time()
 
+        # API 실패 방어: 빈 응답으로 기존 포지션이 잘못 삭제되는 것을 방지
+        if not kis_positions and self.portfolio.positions and not account_info:
+            logger.warning(
+                f"[동기화] API 실패 추정 (포지션 0건 + 계좌정보 없음) — "
+                f"로컬 {len(self.portfolio.positions)}개 포지션 보존"
+            )
+            return
+
         # KIS에 없는 포지션 → 청산 처리
         for symbol in list(self.portfolio.positions.keys()):
             if symbol not in kis_symbols:
